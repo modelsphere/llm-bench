@@ -1,0 +1,36 @@
+LLMBench
+Copyright (c) 2026 the LLMBench authors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This product includes software developed by third parties. Their licenses apply
+to their own code, not to this project's.
+
+Backend (Python)
+  FastAPI, Starlette, Uvicorn ........ MIT / BSD-3-Clause
+  SQLAlchemy, Alembic ................ MIT
+  Pydantic ........................... MIT
+  Dramatiq ........................... LGPL-3.0 (used as a library, unmodified)
+  redis-py ........................... MIT
+  httpx, aiohttp, requests ........... BSD-3-Clause / Apache-2.0
+  guidellm ........................... Apache-2.0
+  python-jose, passlib, bcrypt ....... MIT / BSD / Apache-2.0
+  cryptography ....................... Apache-2.0 / BSD-3-Clause
+  prometheus-client .................. Apache-2.0
+
+Frontend (JavaScript)
+  Vue, Vue Router, Pinia, vue-i18n ... MIT
+  Tailwind CSS ....................... MIT
+  Chart.js, vue-chartjs .............. MIT
+  marked ............................. MIT
+  DOMPurify .......................... Apache-2.0 / MPL-2.0
+  Vite, vue-tsc ...................... MIT
+
+Datasets
+  The academic suites scripts/fetch_academic_datasets.py downloads (AIME 2025,
+  GPQA, IFEval, MMLU-Pro, HLE, LiveCodeBench, SimpleQA, LongBench v2) are
+  separate works under their own licenses and terms. None is redistributed here;
+  the script fetches them from their publishers on Hugging Face.
+
+Container base images
+  python, node, nginx, postgres, redis, busybox — see each image's own license.

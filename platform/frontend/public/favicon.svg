@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<defs>
+<clipPath id="f4outer"><rect x="4" y="4" width="56" height="56" rx="11"></rect></clipPath>
+<clipPath id="f4botclip"><path d="M 4 37 H 26 a 6 6 0 0 0 12 0 H 60 V 60 H 4 Z"></path></clipPath>
+</defs>
+<g clip-path="url(#f4outer)">
+<path fill="#0e1013" d="M 4 4 H 60 V 37 H 38 a 6 6 0 0 1 -12 0 H 4 Z"></path>
+<text x="32" y="21" text-anchor="middle" dominant-baseline="central" font-family="Arial, sans-serif" font-weight="700" font-size="20" fill="#f6f5f1">LLM</text>
+<g clip-path="url(#f4botclip)">
+<path fill="#79d157" d="M 4 37 H 22.67 V 46.5 a 3.5 3.5 0 0 1 0 7 V 60 H 4 Z"></path>
+<path fill="#42a3fd" d="M 22.67 37 H 41.33 V 46.5 a 3.5 3.5 0 0 1 0 7 V 60 H 22.67 V 53.5 a 3.5 3.5 0 0 0 0 -7 Z"></path>
+<path fill="#e24a3f" d="M 41.33 37 H 60 V 60 H 41.33 V 53.5 a 3.5 3.5 0 0 0 0 -7 Z"></path>
+</g>
+</g>
+</svg>

@@ -1,0 +1,104 @@
+# perf-suite-v1 — the starter benchmark, seeded on install (seed.py).
+#
+# Chosen to run anywhere, in minutes, with nothing downloaded: a short
+# concurrency sweep, the functional acceptance checks, a long-output check, and
+# a replay of the shipped example requests. It shows the platform working; it is
+# not a verdict on any model. Build real benchmarks in the admin editor (or
+# import one of these files) with your own sizes, datasets and thresholds —
+# `opencompass` after scripts/fetch_academic_datasets.py, `replay` against your
+# own captures or a rolling profile.
+#
+# Weights sum to 1.0. metric_configs is how the platform judges the raw metrics
+# each module returns: `score` rules feed the module score, `redline` rules
+# decide pass/fail, `display` rules are shown only.
+
+slug: perf-suite-v1
+name: Starter suite
+description: >
+  Throughput and latency across concurrency levels, the 56 functional
+  acceptance checks, long-output truncation, and a replay of example traffic.
+  Runs in a few minutes against any OpenAI-compatible endpoint.
+version: "1"
+status: active
+
+modules:
+  - order_index: 1
+    module_name: perf_guidellm_sweep
+    weight: 0.4
+    params:
+      search_mode: grid
+      concurrencies: "1,4,16"
+      input_tokens: 1024
+      output_tokens: 256
+      max_seconds: 30
+      warmup_seconds: 5
+      request_timeout: 120
+    metric_configs:
+      - key: output_tps
+        role: score
+        weight: 1.0
+        formula: ratio_capped
+        baseline: 2000.0
+      - key: uptime
+        role: redline
+        min_val: 0.95
+      - key: ttft_p99_ms
+        role: display
+      - key: itl_p99_ms
+        role: display
+      - key: request_output_tps
+        role: display
+      - key: reported_concurrency
+        role: display
+
+  - order_index: 2
+    module_name: functional_acceptance
+    weight: 0.3
+    params: {}
+    metric_configs:
+      - key: pass_rate
+        role: score
+        weight: 1.0
+        formula: passthrough
+
+  - order_index: 3
+    module_name: case_truncation
+    weight: 0.1
+    params:
+      concurrency: 2
+      output_tokens: 2048
+      completion_ratio: 0.95
+      request_timeout: 600
+    metric_configs:
+      - key: completion_ratio
+        role: score
+        weight: 1.0
+        formula: passthrough
+      - key: truncation_rate
+        role: display
+      - key: error_rate
+        role: display
+
+  - order_index: 4
+    module_name: replay
+    weight: 0.2
+    params:
+      dataset_path: bench/examples/replay-smoke.jsonl   # relative to the repository root
+      concurrency: 4
+      max_samples: 0
+      request_timeout: 300
+      max_retries: 1
+    metric_configs:
+      - key: uptime
+        role: score
+        weight: 1.0
+        formula: passthrough
+      - key: uptime
+        role: redline
+        min_val: 0.95
+      - key: ttft_p99_ms
+        role: display
+      - key: total_time_p99_ms
+        role: display
+      - key: output_tpm
+        role: display

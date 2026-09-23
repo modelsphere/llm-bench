@@ -1,0 +1,75 @@
+[project]
+name = "llm-bench-backend"
+version = "0.1.0"
+description = "LLMBench: the API, the worker, and the benchmark modules they run"
+requires-python = ">=3.12"
+dependencies = [
+    # web framework
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    # database
+    "sqlalchemy>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.13",
+    "psycopg2-binary>=2.9",
+    "greenlet>=3.0",
+    # auth
+    "python-jose[cryptography]",
+    "passlib[bcrypt]>=1.7",
+    "bcrypt>=4.0,<5.0",
+    "python-multipart",
+    # encryption
+    "cryptography>=41.0",
+    # task queue
+    "dramatiq>=1.16",
+    "redis>=5.0",
+    # validation
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "email-validator>=2.0",
+    # monitoring
+    "prometheus-client>=0.20",
+    # bench layer (treat as library)
+    "pyyaml",
+    "aiohttp",
+    "requests>=2.28",
+    # Direct dependency of app.core.preflight, not just a guidellm transitive:
+    # the probe MUST use the same HTTP stack the benchmark does, because httpx/h11
+    # rejects header values (e.g. a whitespace API key) that requests/urllib3
+    # silently accepts — probing with requests passed endpoints whose every
+    # benchmark request then failed.
+    "httpx",
+    # The load generator. Pinned exactly: a guidellm upgrade can change what a
+    # benchmark measures without changing its configuration, so a bump is
+    # gated on tests/modules/test_guidellm_measurement.py.
+    "guidellm==0.7.4",
+    # Listed only so [tool.uv.sources] can send it to the CPU-wheel index below.
+    "torch",
+    # Diagnostics. A wedged worker gives up nothing without a Python stack: the
+    # 2026-07-22 guidellm teardown deadlock took hours of /proc archaeology to
+    # pin down, and `py-spy dump --pid N` would have answered it in seconds.
+    # Small (single prebuilt binary) and never imported — it is a CLI you run
+    # inside the pod. NOTE: attaching to a sibling process also needs
+    # CAP_SYS_PTRACE, which the chart drops by default — see
+    # app.worker.enablePtrace in values.yaml.
+    "py-spy",
+]
+
+# torch arrives as a guidellm dependency, CPU wheels only (guidellm never runs
+# a model; it needs torch for its data loader). Behind a mirror, point uv at it
+# with UV_INDEX_URL / UV_EXTRA_INDEX_URL rather than editing this file.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio",
+    "httpx",
+    "ruff",
+]

@@ -1,0 +1,35 @@
+LLM Benchmark Platform installed!
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Services:
+  Backend:  {{ include "llm-bench.fullname" . }}-backend:8000
+  Frontend: {{ include "llm-bench.fullname" . }}-frontend:80
+  Worker:   {{ include "llm-bench.fullname" . }}-worker (Dramatiq)
+{{- if .Values.postgresql.enabled }}
+  Postgres: {{ include "llm-bench.postgresql.fullname" . }}:5432
+{{- end }}
+{{- if .Values.redis.enabled }}
+  Redis:    {{ include "llm-bench.redis.fullname" . }}:6379
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+Ingress:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+No ingress enabled. Access the frontend via port-forward:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "llm-bench.fullname" . }}-frontend 8080:80
+
+Then open http://localhost:8080
+{{- end }}
+
+{{- if not .Values.datasets.enabled }}
+
+WARNING: datasets PVC is disabled. Benchmark datasets (5.1GB) are not mounted.
+Enable with:
+  --set datasets.enabled=true
+{{- end }}

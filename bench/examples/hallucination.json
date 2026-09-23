@@ -1,0 +1,15 @@
+{
+  "model": "replace-me",
+  "stream": true,
+  "max_tokens": 512,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Answer only from the provided document. If the document does not say, reply that it does not say."
+    },
+    {
+      "role": "user",
+      "content": "Document:\nThe Lindqvist Bridge opened in 1932 and spans 410 metres across the Aare estuary. It was designed by the engineer Marta Lindqvist and carried rail traffic until 1978, when it was converted to pedestrian and cycle use. A 2011 renovation replaced the deck but kept the original steel arches.\n\nQuestion: Who designed the bridge, how long is it, and what happened in 1978?"
+    }
+  ]
+}

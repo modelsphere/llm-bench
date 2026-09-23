@@ -1,0 +1,28 @@
+# Repository-level tool configuration: lint scope and the module-test layer.
+# There is no package here — the installable project is platform/backend, whose
+# environment the module tests run in:
+#   uv run --project platform/backend python -m pytest tests/modules/
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires mock_server running (auto-started by conftest)",
+]
+
+[tool.ruff]
+# Lint only maintained code. Excluded: fetched datasets and the embedded
+# agentic harness.
+extend-exclude = [
+    "dataset",
+    "bench/llm-perf-bench", # embedded third-party harness, used by `agentic`
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Env/sys.path bootstrap must run before bench/actor imports.
+"platform/backend/app/queue/jobs.py" = ["E402"]
+# Sync-engine section deliberately sits below the async engine it mirrors.
+"platform/backend/app/db/models.py" = ["E402"]
+# Dense weighted-aggregation rows use deliberate one-line statements.
+"bench/tests/functional/functional_acceptance.py" = ["E702"]
+"bench/tests/functional/opencompass.py" = ["E702"]
+"scripts/repro_functional_failures.py" = ["E702"]

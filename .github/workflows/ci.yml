@@ -1,0 +1,223 @@
+# Quality gate — runs on every push and pull request. Images are published by
+# images.yml on a version tag; repository hygiene is checked by gate.yml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Lint the maintained Python code (scope + per-file-ignores live in the root
+  # pyproject's [tool.ruff]). Version pinned to match local runs.
+  ruff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff@0.15.15 check .
+
+  # Backend integration tests: queue recovery, rerun idempotency, preflight,
+  # param-secret redaction, auth/password-reset. Needs real Postgres + Redis
+  # (SQLite/StubBroker would lie — see platform/backend/tests/conftest.py).
+  # GitHub sets CI=true, which makes that conftest fail loudly (instead of
+  # skipping) if these services are unreachable.
+  backend-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25  # cold uv.lock-change runs re-download torch (~13 min); warm runs ~2 min
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: app
+        ports:
+          - 55432:5432  # matches the conftest default TEST_DATABASE_URL
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 56379:6379  # matches the conftest default TEST_REDIS_URL
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false  # keep pre-built wheels (torch) — the download IS the cost
+          cache-suffix: wheels  # busts the pre-prune-fix cache key (immutable, saved near-empty)
+          cache-dependency-glob: platform/backend/uv.lock
+      - name: Install backend environment
+        working-directory: platform/backend
+        run: uv sync --frozen --extra dev
+      - name: Run backend tests
+        working-directory: platform/backend
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: uv run --no-sync pytest tests/ -q
+
+  # Module-layer tests: the evaluator (scoring correctness = leaderboard
+  # correctness), registry/benchmark-YAML integrity, and module runs against
+  # the self-started mock server — including test_guidellm_measurement.py,
+  # which is the gate on any guidellm upgrade. Uses the backend env because it
+  # carries the pinned guidellm.
+  # `python -m pytest` (not bare pytest) so the repo root lands on sys.path.
+  module-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25  # cold uv.lock-change runs re-download torch (~13 min); warm runs ~5 min
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false  # keep pre-built wheels (torch) — the download IS the cost
+          cache-suffix: wheels  # busts the pre-prune-fix cache key (immutable, saved near-empty)
+          cache-dependency-glob: platform/backend/uv.lock
+      - name: Install backend environment
+        working-directory: platform/backend
+        run: uv sync --frozen --extra dev
+      - name: Run module tests
+        run: uv run --no-sync --project platform/backend python -m pytest tests/modules/ -q
+
+  # Migrations are applied automatically by the Helm hook, so a broken
+  # migration = a broken deploy. The backend tests use Base.metadata.create_all
+  # and never exercise them; this job does: `alembic upgrade head` on an empty
+  # DB, `alembic check` (the models and the migrations must agree), a full
+  # downgrade and upgrade again, then the seed — twice, to prove it idempotent.
+  migration-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: app
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:pw@localhost:55432/app
+      DATABASE_URL_SYNC: postgresql://postgres:pw@localhost:55432/app
+      DEBUG: 'true'
+      ADMIN_EMAIL: ci@example.com
+      ADMIN_USERNAME: ci_admin
+      ADMIN_PASSWORD: CiPass12345
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false  # keep pre-built wheels (torch) — the download IS the cost
+          cache-suffix: migrate  # own key: this env is stripped (no torch/guidellm) — never share with full-env jobs
+          cache-dependency-glob: platform/backend/uv.lock
+      # Migrations/seed never import the load-gen stack (guidellm imports are
+      # lazy inside module run()), so skip the two heaviest packages — this
+      # keeps the job fast even on a cold cache. Verified locally.
+      - name: Install backend environment (without load-gen stack)
+        working-directory: platform/backend
+        run: uv sync --frozen --extra dev --no-install-package torch --no-install-package guidellm
+      - name: Migrate from empty database
+        working-directory: platform/backend
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          uv run --no-sync alembic upgrade head
+          uv run --no-sync alembic check
+          uv run --no-sync alembic downgrade base
+          uv run --no-sync alembic upgrade head
+      - name: Seed, twice
+        working-directory: platform/backend
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          SERVICE_API_KEY: llmb_ci_0123456789abcdef0123456789abcdef0123
+        run: |
+          uv run --no-sync python seed.py --skip-migrations
+          uv run --no-sync python seed.py --skip-migrations
+
+  # Type-check + build the SPA (`build` runs `vue-tsc -b && vite build`).
+  # No eslint step: the lint script's eslint isn't in devDependencies yet.
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: platform/frontend/package-lock.json
+      - name: Install
+        working-directory: platform/frontend
+        run: npm ci
+      # Missing locale keys silently fall back to English at runtime, so drift
+      # between en.json and zh-CN.json is invisible without this check.
+      - name: Locale key parity (en vs zh-CN)
+        working-directory: platform/frontend
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          def keys(o, p=''):
+              s = set()
+              for k, v in o.items():
+                  s.add(p + k)
+                  if isinstance(v, dict): s |= keys(v, p + k + '.')
+              return s
+          en = keys(json.load(open('src/locales/en.json')))
+          zh = keys(json.load(open('src/locales/zh-CN.json')))
+          missing, extra = sorted(en - zh), sorted(zh - en)
+          if missing or extra:
+              print('missing in zh-CN:', missing)
+              print('extra in zh-CN:', extra)
+              sys.exit(1)
+          print(f'locale keys in sync ({len(en)} keys)')
+          EOF
+      - name: Type-check and build
+        working-directory: platform/frontend
+        run: npm run build
+
+  # Catch chart regressions before they surface as a failed live deploy.
+  # Secrets are stubbed — templates mark them `required`.
+  helm-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: helm lint + template
+        run: |
+          STUBS=(--set secrets.secretKey=x
+                 --set secrets.platformSecretKey=x
+                 --set secrets.adminEmail=ci@example.com
+                 --set secrets.adminUsername=admin
+                 --set secrets.adminPassword=x
+                 --set postgres.password=x)
+          helm lint deploy/helm/llm-bench "${STUBS[@]}"
+          helm template ci deploy/helm/llm-bench "${STUBS[@]}" > /dev/null
+          helm template ci deploy/helm/llm-bench "${STUBS[@]}" \
+            --set datasets.enabled=true --set datasetBuilder.enabled=true \
+            --set datasetBuilder.bodylog.hostPath=/data/bodylog \
+            --set secrets.serviceApiKey=llmb_ci > /dev/null

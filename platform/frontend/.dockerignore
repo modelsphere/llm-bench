@@ -1,0 +1,8 @@
+# The Dockerfile runs `npm ci` to install dependencies for the alpine builder,
+# then `COPY . .`. Without this file that COPY would overwrite the freshly
+# installed deps with the host's node_modules — which on a dev machine carries
+# host-platform native binaries (esbuild/rollup) that crash in the container.
+# Keep host build artifacts out of the build context entirely.
+node_modules
+dist
+.git

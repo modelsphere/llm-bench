@@ -1,0 +1,120 @@
+# LLMBench on one machine, built from this checkout.
+#
+#   cp .env.example .env          # then fill in the four secrets
+#   docker compose --profile mock up -d --build
+#   open http://localhost:8080    # log in with ADMIN_EMAIL / ADMIN_PASSWORD
+#
+# The `mock` profile adds a fake OpenAI-compatible model at
+# http://mock-llm:8000/v1 (model name "mock") — submit it to perf-suite-v1 to
+# watch a benchmark run end to end without a GPU. Leave the profile off once
+# you are benchmarking real endpoints.
+#
+# For a cluster, use the Helm chart in deploy/helm/llm-bench instead.
+
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: platform/backend/Dockerfile
+  environment: &backend-env
+    DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/llmbench
+    DATABASE_URL_SYNC: postgresql://postgres:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/llmbench
+    REDIS_URL: redis://redis:6379/0
+    SECRET_KEY: ${SECRET_KEY:?set in .env}
+    PLATFORM_SECRET_KEY: ${PLATFORM_SECRET_KEY:?set in .env}
+    ROOT_PATH: /api
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+  volumes:
+    # Fetched datasets (scripts/fetch_academic_datasets.py) and your own replay
+    # captures. The examples every module defaults to are inside the image.
+    - ./dataset:/app/dataset:ro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: llmbench
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "400mb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Migrations, the first admin, the starter benchmark, and — when
+  # SERVICE_API_KEY is set — the service account LLM AutoTune uses.
+  # Idempotent: every `up` re-runs it and it changes nothing that exists.
+  migrate:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?set in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set in .env}
+      SERVICE_USERNAME: ${SERVICE_USERNAME:-autotune}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:-}
+    command: ["python", "seed.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    <<: *backend
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    <<: *backend
+    # One task per process: a crash takes down one benchmark, not its
+    # neighbours, and per-submission log capture needs a process of its own.
+    command: ["dramatiq", "app.queue.broker", "app.queue.jobs",
+              "--processes", "${WORKER_PROCESSES:-2}", "--threads", "1"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: platform/frontend
+    ports:
+      - "${LLMBENCH_PORT:-8080}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # A fake model for trying the platform: same API as sglang/vLLM, fixed
+  # timings, no GPU. Submit http://mock-llm:8000/v1 with model "mock".
+  mock-llm:
+    <<: *backend
+    profiles: ["mock"]
+    environment: {}
+    volumes: []
+    command: ["python", "mock_server.py", "--host", "0.0.0.0", "--port", "8000",
+              "--model", "mock", "--ttft-ms", "300", "--tpot-ms", "20",
+              "--output-tokens", "256"]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
