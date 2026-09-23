@@ -6,6 +6,18 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def find_bench_dir(start: Path) -> Path:
+    """The `bench/` package nearest above `start`: the first ancestor holding
+    `bench/modules`. Falls back to `<ancestor>/bench` two levels up (the image's
+    /app/bench) when nothing is found, never raising for a shallow path."""
+    here = start.resolve()
+    for parent in here.parents:
+        if (parent / "bench" / "modules").is_dir():
+            return parent / "bench"
+    parents = here.parents
+    return parents[min(2, len(parents) - 1)] / "bench"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -56,10 +68,11 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = "http://localhost:5173"
 
     # Path to the bench modules (for imports). The container image copies them to
-    # /app/bench; a source checkout resolves ./bench relative to the repo root.
-    BENCH_MODULES_PATH: str = str(
-        Path(__file__).resolve().parents[4] / "bench"
-    )
+    # /app/bench (and sets the env); a source checkout resolves ./bench relative
+    # to the repo root. Found by walking up rather than by counting parents: the
+    # image flattens the tree (/app/app/core/config.py), and a fixed depth there
+    # is an IndexError before any setting is read.
+    BENCH_MODULES_PATH: str = str(find_bench_dir(Path(__file__)))
 
     # Expose real exception messages in 500 responses. Defaults OFF so a public
     # deploy that sets nothing fails safe (generic "Internal error", and the
