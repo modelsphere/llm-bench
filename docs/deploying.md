@@ -32,6 +32,24 @@ the chart's `appVersion` unless you set `image.*.tag`. If the cluster cannot
 reach ghcr.io or Docker Hub, mirror them and set `image.*.repository` plus
 `postgres.image`, `redis.image`, `initContainer.image`.
 
+One more thing the worker fetches at first use: the throughput modules size
+their synthetic prompts with a public tokenizer (`Qwen/Qwen3-0.6B`, from the
+Hugging Face hub). On a cluster that cannot reach huggingface.co, either name a
+mirror or mount a tokenizer directory, through `app.extraEnv`:
+
+```yaml
+app:
+  extraEnv:
+    - name: HF_ENDPOINT              # a hub mirror
+      value: https://hf-mirror.com
+    # or, with a tokenizer directory on the datasets volume:
+    # - name: PROCESSOR_PATH
+    #   value: /app/dataset/tokenizers/qwen3-0.6b
+```
+
+Without one of these, every `perf_guidellm*` run fails at start with a
+tokenizer download error, and the rest of the platform is unaffected.
+
 ## Sizing
 
 Concurrent benchmark runs = `replicaCount.worker` × `app.worker.processes`.

@@ -50,6 +50,10 @@ spec:
                 name: {{ include "llm-bench.fullname" . }}
             - secretRef:
                 name: {{ include "llm-bench.fullname" . }}
+          {{- with .Values.app.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- if .Values.datasets.enabled }}
           volumeMounts:
             - name: datasets

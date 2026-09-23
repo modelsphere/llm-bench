@@ -6,7 +6,10 @@ FROM node:22.22-alpine AS builder
 
 WORKDIR /app
 
-ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+# Behind a package mirror, pass it in rather than editing this file:
+#   docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com ...
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 COPY package*.json ./
 RUN npm ci
 

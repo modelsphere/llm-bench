@@ -193,6 +193,16 @@ secrets:
 # ---------------------------------------------------------------------------
 app:
   allowedOrigins: "*"
+  # Extra environment for the backend, worker, migrate job and collector, as
+  # plain k8s env entries. The one most installs need is a Hugging Face mirror:
+  # the throughput modules size their synthetic prompts with a public tokenizer
+  # (PROCESSOR_DEFAULT, Qwen/Qwen3-0.6B) fetched at first use, so a cluster
+  # that cannot reach huggingface.co either names a mirror or mounts a
+  # tokenizer directory and points PROCESSOR_PATH at it.
+  #   extraEnv:
+  #     - name: HF_ENDPOINT
+  #       value: https://hf-mirror.com
+  extraEnv: []
   benchModulesPath: "/app/bench"
   debug: false
   # Per-user cap on ACTIVE (queued + running) submissions — fairness guard so

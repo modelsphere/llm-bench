@@ -86,6 +86,9 @@ spec:
             # drain budget. See app.worker.queuePrefetch in values.yaml.
             - name: dramatiq_queue_prefetch
               value: {{ .Values.app.worker.queuePrefetch | quote }}
+            {{- with .Values.app.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- if .Values.datasets.enabled }}
           volumeMounts:
             - name: datasets

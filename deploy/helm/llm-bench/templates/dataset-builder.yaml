@@ -78,6 +78,9 @@ spec:
             # `timezone` value) — see app/datasets/sources.py.
             - name: REPLAY_FEED_FILE_TZ
               value: {{ .Values.datasetBuilder.bodylog.fileTimezone | default "UTC" | quote }}
+            {{- with .Values.app.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             {{- with .Values.datasetBuilder.logLevel }}
             - name: LOG_LEVEL
               value: {{ . | quote }}
