@@ -14,13 +14,14 @@ WORKDIR /app
 # Install uv for fast package installs
 COPY --from=ghcr.io/astral-sh/uv:0.9.22 /uv /usr/local/bin/uv
 
-# Install from the lockfile, so the image carries exactly what CI tested.
-# Behind a package mirror, pass it in rather than editing this file:
-#   docker build --build-arg UV_INDEX_URL=https://mirror.example/simple ...
-# (torch comes from the PyTorch CPU index, see [tool.uv.index] in pyproject.toml;
-# override that one with UV_EXTRA_INDEX_URL if it is also mirrored.)
-ARG UV_INDEX_URL
-ARG UV_EXTRA_INDEX_URL
+# Install from the lockfile, so the image carries exactly what CI tested. The
+# lock pins each wheel's URL (files.pythonhosted.org, download.pytorch.org),
+# so an index mirror does not apply here; on a slow link, raise the
+# per-request timeout instead of retrying a failed build:
+#   docker build --build-arg UV_HTTP_TIMEOUT=600 ...
+ARG UV_HTTP_TIMEOUT=120
+ARG UV_HTTP_RETRIES=3
+ENV UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT} UV_HTTP_RETRIES=${UV_HTTP_RETRIES}
 COPY platform/backend/pyproject.toml platform/backend/uv.lock /app/
 # Persist uv's download cache across image builds via a BuildKit cache mount,
 # so a busted layer re-resolves without re-downloading torch and friends.
