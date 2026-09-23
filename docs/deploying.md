@@ -64,6 +64,14 @@ keep it under `postgres.maxConnections` (150).
 
 ## Storage
 
+**Slow network volumes and the first start.** Postgres's `initdb` on juicefs,
+NFS or Ceph can take well over ten minutes. The chart's startup probe gives it
+30 minutes (`postgres.startupProbe.failureThreshold`, × 10 s) before the
+kubelet restarts it — raise it on slower storage. A restart during initdb is
+not recoverable: the entrypoint never writes the network `pg_hba.conf` entry,
+every client is refused with "no pg_hba.conf entry", and the only repair is
+deleting the PVC and installing again.
+
 | Volume | Access | Why |
 |---|---|---|
 | Postgres data | RWO | `helm.sh/resource-policy: keep` — survives `helm uninstall` |

@@ -84,7 +84,12 @@ spec:
           # WAL, which on network storage has been seen to
           # take ~50s. Without a startupProbe the liveness probe kills postgres mid-replay
           # and the next attempt restarts recovery from scratch -- an unrecoverable loop.
-          # Hold liveness off for up to 10 minutes so recovery can finish.
+          # Hold liveness off until postgres answers. The budget also covers the
+          # FIRST start's initdb, which on network storage (juicefs, NFS, Ceph)
+          # can exceed 10 minutes: killed mid-initdb, the entrypoint never writes
+          # the network pg_hba.conf entry and every later connection is refused,
+          # a broken volume that only a wipe repairs. So the budget is generous
+          # and configurable (postgres.startupProbe.failureThreshold x 10 s).
           startupProbe:
             exec:
               command:
@@ -92,7 +97,7 @@ spec:
                 - -U
                 - {{ .Values.postgres.username | quote }}
             periodSeconds: 10
-            failureThreshold: 60
+            failureThreshold: {{ .Values.postgres.startupProbe.failureThreshold | default 180 }}
             timeoutSeconds: 5
           livenessProbe:
             exec:

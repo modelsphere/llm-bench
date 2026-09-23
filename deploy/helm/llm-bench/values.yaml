@@ -408,6 +408,12 @@ postgres:
   database: llmbench
   username: "postgres"
   password: ""
+  # How long the first start may take before the kubelet restarts postgres:
+  # failureThreshold x 10 s. The default (30 min) covers an initdb on slow
+  # network storage; a restart during initdb leaves a volume no client can
+  # connect to (missing pg_hba.conf entry) that only a wipe repairs.
+  startupProbe:
+    failureThreshold: 180
   # Headroom for more worker processes/backends. Budget: N_worker_procs x
   # worker pool_size (2) + backend replicas x 15 + slack, kept under this. The
   # default postgres image caps at 100; 150 covers ~32 worker processes safely.
