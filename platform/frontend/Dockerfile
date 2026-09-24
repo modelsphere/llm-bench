@@ -2,7 +2,9 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build
 # ---------------------------------------------------------------------------
-FROM node:22.22-alpine AS builder
+# Emits static files only, so it runs on the builder's own platform even when
+# the image is built for another one.
+FROM --platform=$BUILDPLATFORM node:22.22-alpine AS builder
 
 WORKDIR /app
 

@@ -3,12 +3,12 @@
 # ---------------------------------------------------------------------------
 image:
   backend:
-    repository: ghcr.io/modelsphere/llm-bench-backend
+    repository: docker.io/4pdosc/llm-bench-backend
     pullPolicy: IfNotPresent
     # Empty falls back to the chart's appVersion, so a chart upgrade moves both.
     tag: ""
   frontend:
-    repository: ghcr.io/modelsphere/llm-bench-frontend
+    repository: docker.io/4pdosc/llm-bench-frontend
     pullPolicy: IfNotPresent
     tag: ""
 

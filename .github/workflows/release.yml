@@ -1,0 +1,93 @@
+name: release
+
+# A version tag builds the two images the chart deploys and pushes them to
+# Docker Hub, as the other modelsphere components do.
+#
+#   v0.1.0      -> 4pdosc/<image>:0.1.0 and 4pdosc/<image>:latest
+#   v0.1.0-rc1  -> 4pdosc/<image>:0.1.0-rc1 only; a candidate never takes latest
+#
+# Credentials are the org secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      latest: ${{ steps.check.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v5
+      # The chart's image tags default to its appVersion, so a tag that disagrees
+      # would publish one build and install another. Fail before pushing. A
+      # prerelease is compared by its version core, so 0.1.0-rc1 rehearses 0.1.0.
+      - id: check
+        name: The tag agrees with the chart
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          core="${version%%-*}"
+          chart=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' deploy/helm/llm-bench/Chart.yaml)
+          if [ "$core" != "$chart" ]; then
+            echo "::error::tag $GITHUB_REF_NAME != chart appVersion $chart; bump deploy/helm/llm-bench/Chart.yaml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$version" = "$core" ]; then latest=true; else latest=false; fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: llm-bench-backend
+            context: .
+            dockerfile: platform/backend/Dockerfile
+          - name: llm-bench-frontend
+            context: platform/frontend
+            dockerfile: platform/frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v5
+      - id: tags
+        name: Image tags
+        run: |
+          set -eu
+          image="docker.io/4pdosc/${{ matrix.name }}"
+          {
+            echo "tags<<TAGS_EOF"
+            echo "$image:${{ needs.version.outputs.version }}"
+            if [ "${{ needs.version.outputs.latest }}" = true ]; then echo "$image:latest"; fi
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          # Shown on the admin Version page, so a running deployment says what it is.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref_name }}
+            BUILD_TIME=${{ steps.tags.outputs.build_time }}
+            IMAGE_TAG=${{ needs.version.outputs.version }}

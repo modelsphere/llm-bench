@@ -27,9 +27,9 @@ schema, then `seed.py` creates the first admin, the `perf-suite-v1` benchmark
 and — when `secrets.serviceApiKey` is set — the service account. It never
 rewrites anything that already exists, so it is safe on every upgrade.
 
-The images are `ghcr.io/modelsphere/llm-bench-{backend,frontend}`, tagged with
-the chart's `appVersion` unless you set `image.*.tag`. If the cluster cannot
-reach ghcr.io or Docker Hub, mirror them and set `image.*.repository` plus
+The images are `docker.io/4pdosc/llm-bench-{backend,frontend}` (amd64 and arm64),
+tagged with the chart's `appVersion` unless you set `image.*.tag`. If the cluster
+cannot reach Docker Hub, mirror them and set `image.*.repository` plus
 `postgres.image`, `redis.image`, `initContainer.image`.
 
 One more thing the worker fetches at first use: the throughput modules size
