@@ -185,7 +185,7 @@ def test_clip_json_never_cuts_into_the_skeleton(counter):
     """Regression: a cap too small for the JSON structure itself must leave the
     arguments valid and over budget, not shredded.
 
-    The 6k build of gpu-41-42 shipped 535 tool calls whose arguments read
+    A 6k build of an agent capture shipped 535 tool calls whose arguments read
     `{"…[truncated]…}` — clip_to_budget re-clips across passes, so a pass that
     emptied every string value handed the next one an argument with no string
     leaves left, which fell through to a raw text clip of the braces."""

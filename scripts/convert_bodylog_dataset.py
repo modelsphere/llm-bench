@@ -16,8 +16,8 @@ silently dropped).
 
 Usage:
     python scripts/convert_bodylog_dataset.py \
-        dataset/replay/bodylog_172-26-3-79_8050_2026-06-25_00h.jsonl \
-        dataset/replay/bodylog_172-26-3-79_8050_2026-06-25_00h.replay.jsonl \
+        dataset/replay/bodylog_2026-06-25_00h.jsonl \
+        dataset/replay/bodylog_2026-06-25_00h.replay.jsonl \
         [--limit 1000] [--clean --max-model-len 262144]
 
 The output JSONL is compatible with bench.replay_test.log_replay_tool.load_extract_jsonl.

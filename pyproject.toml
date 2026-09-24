@@ -25,4 +25,3 @@ extend-exclude = [
 # Dense weighted-aggregation rows use deliberate one-line statements.
 "bench/tests/functional/functional_acceptance.py" = ["E702"]
 "bench/tests/functional/opencompass.py" = ["E702"]
-"scripts/repro_functional_failures.py" = ["E702"]

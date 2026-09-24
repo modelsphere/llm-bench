@@ -8,8 +8,8 @@ that tail, you need a copy of the dataset whose requests all fit under a ceiling
 *without* changing the shape of everything below it.
 
     python scripts/truncate_replay_dataset.py \
-        dataset/replay/gpu-41-42-2026-06-29-1400-bystart.replay.jsonl \
-        dataset/replay/gpu-41-42-2026-06-29-1400-bystart.20k.replay.jsonl \
+        dataset/replay/capture.replay.jsonl \
+        dataset/replay/capture.20k.replay.jsonl \
         --max-input-tokens 20000 --max-output-tokens 12000 --drop-multimodal
 
 Requests already under the limit are copied through untouched. Input and output
@@ -19,7 +19,7 @@ bench/replay_test/jsonl_io.py).
 How a request is shrunk (`--strategy`, default `drop-then-clip`)
 ---------------------------------------------------------------
 **Stage 1 — drop the oldest conversation turns.** Agent traffic is mostly
-history: on this repo's gpu-41-42 dataset the largest request is 414 messages,
+history: in one captured agent dataset the largest request is 414 messages,
 203 of them assistant turns, and 89K of its 240K tokens are `tool_calls`
 arguments. Nothing is oversized there; there is just a lot of it. Shedding old
 turns is what an agent harness itself does when it runs out of context, and it
@@ -67,7 +67,7 @@ Fitting the *output* too (`--max-output-tokens`)
 ------------------------------------------------
 Capping the prompt is only half of moving a capture onto a smaller server. The
 requests still carry the generation limits production asked for (65,536 tokens
-on half of gpu-41-42; 262,144 on one record), and an OpenAI-compatible engine
+on half of one agent capture; 262,144 on one record), and an OpenAI-compatible engine
 rejects a request whose `prompt + max_tokens` exceeds its window instead of
 clamping it the way a gateway does — so a 6K-input dataset still 400s on a 32K
 server. `--max-output-tokens` lowers that limit in the dataset, and sets one on
@@ -86,7 +86,7 @@ input" for the whole request. Those records are always counted in the summary;
 
 Some requests also stay above the limit no matter how hard they are clipped.
 Their bulk is the part that is deliberately never cut: tool names and parameter
-schemas. One request in gpu-41-42 carries 87 tool definitions worth 20,669
+schemas. One request in an agent capture carries 87 tool definitions worth 20,669
 tokens with every description already emptied — only 388 of those are the names
 themselves; the rest is JSON Schema structure the model needs to emit a valid
 call. Truncating to 6K leaves 189 such records (22%), the worst 3.4x over.
@@ -105,7 +105,7 @@ template is applied — the vendored processor configs don't ship one for MiniMa
 and the model that produced a captured dataset is usually not the model you are
 about to benchmark anyway.
 
-Measured against the capture's own accounting on gpu-41-42 (Kimi-K2.5 traffic),
+Measured against the capture's own accounting on an agent capture (Kimi-K2.5 traffic),
 this estimate runs ~6% HIGH — it errs toward truncating slightly more than
 strictly necessary. The summary prints the observed ratio for your dataset and
 tokenizer, so you can adjust the limit if you need the server-side count to land
@@ -574,7 +574,7 @@ def clamp_output_tokens(body: dict, cap: int) -> bool:
 
     Capping the *input* is only half of fitting a capture onto a smaller server.
     The requests still carry the generation limits the original traffic asked
-    for — in this repo's gpu-41-42 capture that is 65,536 tokens on half the
+    for — in one agent capture that is 65,536 tokens on half the
     dataset and 262,144 on one record. An OpenAI-compatible engine checks
     `prompt + max_tokens` against its context window and REJECTS the request
     when it doesn't fit, rather than silently clamping the way a production
@@ -613,7 +613,7 @@ def has_non_text_content(body: dict) -> bool:
     one thing truncation cannot shrink and a text-only target cannot accept: a
     vLLM/SGLang deployment started with `--limit-mm-per-prompt image=0` answers
     501 "This server does not accept image input" for the whole request. The
-    12 such records in gpu-41-42 are a rounding error in the dataset but a
+    12 such records in one agent capture are a rounding error in the dataset but a
     steady drip of failures in a replay run.
     """
     for msg in body.get("messages") or []:

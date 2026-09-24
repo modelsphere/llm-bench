@@ -16,7 +16,7 @@ JSONL) or `resp_meta.usage` (raw bodylog) — whichever is present.
 
 Usage:
     python scripts/analyze_replay_dataset.py \
-        dataset/replay/bodylog_172-26-3-79_8050_2026-06-25_00h.replay.jsonl \
+        dataset/replay/bodylog_2026-06-25_00h.replay.jsonl \
         [--head 100] [--tail 100] [--segments 10]
 """
 from __future__ import annotations

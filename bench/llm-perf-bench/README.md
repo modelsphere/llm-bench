@@ -15,9 +15,9 @@ Standalone use:
 export LLM_PERF_BASE_URL=http://localhost:8000
 export LLM_PERF_MODEL=my-model
 python3 llm_benchmark.py --name my-test --desc "what is being measured" \
-    --work-dir ./ --test-set ./resources/testset.txt
+    --work-dir ./ --test-set path/to/testset.txt
 ```
 
 `model_query.py` sends each request: it tries `BASE_URL/v1/messages` first and
-falls back to `BASE_URL/v1/chat/completions`. Copy `model_query.py.template` to
-adapt it to another API shape.
+falls back to `BASE_URL/v1/chat/completions`. Edit it to adapt the harness to another API
+shape.
