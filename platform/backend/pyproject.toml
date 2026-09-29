@@ -1,6 +1,6 @@
 [project]
 name = "llm-bench-backend"
-version = "0.1.0"
+version = "0.1.2"
 description = "LLMBench: the API, the worker, and the benchmark modules they run"
 requires-python = ">=3.12"
 dependencies = [

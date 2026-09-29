@@ -214,7 +214,7 @@ _DOCS_PREFIX = settings.ROOT_PATH.rstrip("/")
 app = FastAPI(
     title="LLM Benchmark Platform API",
     description="Multi-tenant LLM benchmark leaderboard with modular test units",
-    version="0.1.0",
+    version="0.1.2",
     lifespan=lifespan,
     # `servers` makes Swagger "Try it out" target {prefix}/... (e.g. /api/auth/login)
     # so requests route back through nginx. Routing itself stays at bare paths.
