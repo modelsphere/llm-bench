@@ -7,10 +7,13 @@ Two supported ways to run it:
 | `docker compose` at the repository root | One machine: trying it, a small team, CI. See the [README](../README.md). |
 | The Helm chart, `deploy/helm/llm-bench` | A Kubernetes cluster. This page. |
 
+To try it next to LLM AutoTune, its `deploy/quickstart.sh` installs both on one
+cluster and connects them.
+
 ## Install
 
 ```bash
-scripts/gen-prod-secrets.sh --out secrets.prod.yaml --service-key   # prints the admin password once
+scripts/gen-prod-secrets.sh --out secrets.prod.yaml --service-key   # needs only openssl; prints the admin password once
 helm upgrade --install llm-bench deploy/helm/llm-bench \
   -n llm-bench --create-namespace -f secrets.prod.yaml
 kubectl -n llm-bench port-forward svc/llm-bench-frontend 8080:80
@@ -32,23 +35,23 @@ tagged with the chart's `appVersion` unless you set `image.*.tag`. If the cluste
 cannot reach Docker Hub, mirror them and set `image.*.repository` plus
 `postgres.image`, `redis.image`, `initContainer.image`.
 
-One more thing the worker fetches at first use: the throughput modules size
-their synthetic prompts with a public tokenizer (`Qwen/Qwen3-0.6B`, from the
-Hugging Face hub). On a cluster that cannot reach huggingface.co, either name a
-mirror or mount a tokenizer directory, through `app.extraEnv`:
+The throughput modules size their synthetic prompts with a tokenizer. The
+image carries one (Qwen3-0.6B's, at `/app/tokenizers/qwen3-0.6b`), so a
+benchmark downloads nothing at run time and runs on a cluster with no route to
+huggingface.co. To size prompts with another, e.g. your model's own, prepare it
+with `scripts/fetch_tokenizer.py --repo <org/model> --out <dir>`, put the
+directory on the datasets volume, and point the worker at it through
+`app.extraEnv`:
 
 ```yaml
 app:
   extraEnv:
-    - name: HF_ENDPOINT              # a hub mirror
-      value: https://hf-mirror.com
-    # or, with a tokenizer directory on the datasets volume:
-    # - name: PROCESSOR_PATH
-    #   value: /app/dataset/tokenizers/qwen3-0.6b
+    - name: PROCESSOR_PATH
+      value: /app/dataset/tokenizers/my-model
 ```
 
-Without one of these, every `perf_guidellm*` run fails at start with a
-tokenizer download error, and the rest of the platform is unaffected.
+A module's `processor_path` parameter overrides both. A Hugging Face repo id
+works there too; it is downloaded at first use, through `HF_ENDPOINT` if set.
 
 ## Sizing
 

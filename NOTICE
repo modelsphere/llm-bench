@@ -26,6 +26,11 @@ Frontend (JavaScript)
   DOMPurify .......................... Apache-2.0 / MPL-2.0
   Vite, vue-tsc ...................... MIT
 
+Tokenizer
+  The backend image includes the tokenizer files of Qwen/Qwen3-0.6B
+  (https://huggingface.co/Qwen/Qwen3-0.6B), Apache-2.0, by the Qwen team,
+  Alibaba Cloud. Its LICENSE is in the image next to them.
+
 Datasets
   The academic suites scripts/fetch_academic_datasets.py downloads (AIME 2025,
   GPQA, IFEval, MMLU-Pro, HLE, LiveCodeBench, SimpleQA, LongBench v2) are

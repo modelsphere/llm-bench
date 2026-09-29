@@ -2,7 +2,7 @@
 
 ## Between releases
 
-`helm upgrade` (or `docker compose up -d --build`) is the whole procedure: the
+`helm upgrade` (or, with Compose, set `LLMBENCH_VERSION` and `docker compose up -d`) is the whole procedure: the
 migrate step applies new schema revisions and re-runs the idempotent seed.
 Read the changelog first; a release that needs a quiet window says so, and
 [deploying.md](deploying.md#disruptive-upgrades) describes how to take one.
