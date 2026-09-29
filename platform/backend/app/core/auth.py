@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,6 +14,10 @@ from pydantic import BaseModel
 from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# passlib reads a version attribute bcrypt 4.1+ no longer has, and logs the
+# (harmless, trapped) AttributeError with a traceback on first use — which
+# reads like a failed install. Hashing is unaffected.
+logging.getLogger("passlib.handlers.bcrypt").setLevel(logging.ERROR)
 
 # Personal API keys are presented in the same `Authorization: Bearer <token>`
 # header as JWTs. This prefix lets get_current_user tell them apart: JWTs are

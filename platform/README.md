@@ -43,8 +43,7 @@ With `DEBUG` off the backend refuses to start on the placeholder
 To benchmark something without a GPU, run the mock model and submit it:
 
 ```bash
-uv run --project platform/backend python mock_server.py --port 8001 --model mock \
-    --ttft-ms 300 --tpot-ms 20 --output-tokens 256
+uv run --project platform/backend python mock_server.py --port 8001 --model mock
 # submit http://localhost:8001/v1, model "mock", to perf-suite-v1 from the UI
 ```
 

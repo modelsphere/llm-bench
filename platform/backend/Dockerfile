@@ -32,6 +32,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 # ---------------------------------------------------------------------------
+# The tokenizer the throughput modules size their prompts with
+# ---------------------------------------------------------------------------
+# Qwen3-0.6B's (Apache-2.0), at a pinned revision, so a benchmark never needs
+# huggingface.co at run time: many clusters cannot reach it, and a first-use
+# download from the hub has been seen to hang with no timeout. Behind a mirror:
+#   docker build --build-arg HF_ENDPOINT=https://hf-mirror.com ...
+FROM python:3.12-slim AS tokenizer
+ARG HF_ENDPOINT=https://huggingface.co
+COPY scripts/fetch_tokenizer.py /fetch_tokenizer.py
+RUN HF_ENDPOINT="$HF_ENDPOINT" python /fetch_tokenizer.py --repo Qwen/Qwen3-0.6B \
+      --revision c1899de289a04d12100db370d81485cdf75e47ca --out /tokenizer
+
+# ---------------------------------------------------------------------------
 # Production stage
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim
@@ -63,6 +76,10 @@ COPY platform/backend/preflight_migration.py /app/preflight_migration.py
 
 ENV PYTHONPATH="/app"
 ENV BENCH_MODULES_PATH="/app/bench"
+# The default tokenizer (bench/tests/base.py); PROCESSOR_PATH and a module's
+# processor_path still override it.
+COPY --from=tokenizer /tokenizer /app/tokenizers/qwen3-0.6b
+ENV PROCESSOR_DEFAULT="/app/tokenizers/qwen3-0.6b"
 # Writable cache locations. In k8s the pod runs as a pinned non-root UID
 # (podSecurityContext runAsUser: 1000) with no /etc/passwd entry, so HOME
 # resolves to / and HuggingFace/transformers tries to use /.cache — unwritable,

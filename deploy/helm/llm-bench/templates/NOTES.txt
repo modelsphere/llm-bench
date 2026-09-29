@@ -29,7 +29,7 @@ Then open http://localhost:8080
 
 {{- if not .Values.datasets.enabled }}
 
-WARNING: datasets PVC is disabled. Benchmark datasets (5.1GB) are not mounted.
-Enable with:
-  --set datasets.enabled=true
+Every module runs on the example data inside the image. For the academic
+suites or your own replay captures, add a datasets volume (datasets.enabled);
+see docs/deploying.md.
 {{- end }}

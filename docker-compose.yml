@@ -1,8 +1,11 @@
-# LLMBench on one machine, built from this checkout.
+# LLMBench on one machine.
 #
-#   cp .env.example .env          # then fill in the four secrets
-#   docker compose --profile mock up -d --build
-#   open http://localhost:8080    # log in with ADMIN_EMAIL / ADMIN_PASSWORD
+#   scripts/gen-prod-secrets.sh --env      # writes .env: secrets and the first admin
+#   docker compose --profile mock up -d
+#   open http://localhost:8080             # log in with ADMIN_EMAIL / ADMIN_PASSWORD
+#
+# It runs the released images (LLMBENCH_VERSION, default below); add --build to
+# run this checkout instead.
 #
 # The `mock` profile adds a fake OpenAI-compatible model at
 # http://mock-llm:8000/v1 (model name "mock") — submit it to perf-suite-v1 to
@@ -12,6 +15,7 @@
 # For a cluster, use the Helm chart in deploy/helm/llm-bench instead.
 
 x-backend: &backend
+  image: docker.io/4pdosc/llm-bench-backend:${LLMBENCH_VERSION:-0.1.2}
   build:
     context: .
     dockerfile: platform/backend/Dockerfile
@@ -96,6 +100,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    image: docker.io/4pdosc/llm-bench-frontend:${LLMBENCH_VERSION:-0.1.2}
     build:
       context: platform/frontend
     ports:
@@ -104,16 +109,17 @@ services:
       - backend
     restart: unless-stopped
 
-  # A fake model for trying the platform: same API as sglang/vLLM, fixed
-  # timings, no GPU. Submit http://mock-llm:8000/v1 with model "mock".
+  # A fake model for trying the platform: same API as sglang/vLLM, no GPU, and
+  # fast (20 ms to the first token, 1 ms per token, replies capped at 4096
+  # tokens), so a whole perf-suite-v1 run takes minutes. Submit
+  # http://mock-llm:8000/v1 with model "mock".
   mock-llm:
     <<: *backend
     profiles: ["mock"]
     environment: {}
     volumes: []
     command: ["python", "mock_server.py", "--host", "0.0.0.0", "--port", "8000",
-              "--model", "mock", "--ttft-ms", "300", "--tpot-ms", "20",
-              "--output-tokens", "256"]
+              "--model", "mock"]
     restart: unless-stopped
 
 volumes:

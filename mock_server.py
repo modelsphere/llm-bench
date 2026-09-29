@@ -520,12 +520,15 @@ def parse_args() -> argparse.Namespace:
                         help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--model", type=str, default="mock",
                         help="Model name served at /v1/models (default: mock)")
-    parser.add_argument("--ttft-ms", type=float, default=35210,
-                        help="Time-to-first-token in ms (default: 35210 — a slow reasoning model)")
-    parser.add_argument("--tpot-ms", type=float, default=49.4,
-                        help="Per-token delay in ms (default: 49.4)")
-    parser.add_argument("--output-tokens", type=int, default=1500,
-                        help="Output tokens per response when request has no max_tokens (default: 1500)")
+    # Fast by default: the mock proves a pipeline, and a slow one only makes
+    # every benchmark against it slow. Pass realistic timings when a test
+    # needs them.
+    parser.add_argument("--ttft-ms", type=float, default=20,
+                        help="Time-to-first-token in ms (default: 20)")
+    parser.add_argument("--tpot-ms", type=float, default=1,
+                        help="Per-token delay in ms (default: 1)")
+    parser.add_argument("--output-tokens", type=int, default=256,
+                        help="Output tokens per response when request has no max_tokens (default: 256)")
     parser.add_argument("--reasoning-tokens", type=int, default=0,
                         help="Stream this many reasoning tokens BEFORE the visible content, "
                              "mimicking a thinking model (GLM/DeepSeek/vLLM). They are added to "
@@ -534,10 +537,11 @@ def parse_args() -> argparse.Namespace:
                         help="Delta key the reasoning tokens are streamed under (default: "
                              "reasoning_content, as GLM/vLLM use). Set to an unrecognized name "
                              "to simulate a server guidellm doesn't detect.")
-    parser.add_argument("--max-output-tokens", type=int, default=0,
-                        help="Hard cap on output tokens regardless of request max_tokens. "
-                             "Useful for testing with datasets that contain huge max_tokens values. "
-                             "(default: 0 = disabled, honour request max_tokens)")
+    parser.add_argument("--max-output-tokens", type=int, default=4096,
+                        help="Hard cap on output tokens regardless of request max_tokens, so a "
+                             "request for 64K tokens (functional checks, some datasets) does not "
+                             "stream for minutes; perf-suite-v1's longest ask is 2048. "
+                             "(default: 4096; 0 = honour request max_tokens)")
     parser.add_argument("--truncate-at", type=int, default=0,
                         help="Simulate truncation: cap at N tokens with finish_reason='length' "
                              "(default: 0 = disabled)")

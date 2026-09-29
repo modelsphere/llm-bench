@@ -28,29 +28,39 @@ can be compared.
 
 ## Quickstart — one machine, no GPU
 
+You need Docker (with Compose) and openssl.
+
 ```bash
 git clone https://github.com/modelsphere/llm-bench && cd llm-bench
-cp .env.example .env            # fill in the four secrets; the file says how
-docker compose --profile mock up -d --build
+scripts/gen-prod-secrets.sh --env        # writes .env and prints the admin login
+docker compose --profile mock up -d
 ```
 
-Open <http://localhost:8080> and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`
-from `.env`. The `mock` profile runs a fake model: submit
-`http://mock-llm:8000/v1`, model `mock`, to **perf-suite-v1** and watch it go
-through every module. The numbers mean nothing about any real model; the point
-is to see the whole pipeline work. Drop `--profile mock` once you are
-benchmarking real endpoints.
+This runs the released images; add `--build` to run the checkout instead. Open
+<http://localhost:8080> and sign in with the email and password the script
+printed. The `mock` profile runs a fake model: submit `http://mock-llm:8000/v1`,
+model `mock`, to **perf-suite-v1**, and watch it go through every module in a
+few minutes. The numbers mean nothing about any real model; the point is to see
+the whole pipeline work. Drop `--profile mock` once you are benchmarking real
+endpoints.
 
-For the academic suites, fetch the public datasets first:
+Nothing is downloaded while a benchmark runs: the image carries the tokenizer
+the throughput modules size their prompts with.
+
+**Optional: datasets.** Every module runs on the example data in the image.
+For the academic suites, fetch the public datasets into `dataset/` first:
 `uv run --project platform/backend python scripts/fetch_academic_datasets.py`.
+For replaying your own traffic, see [docs/replay-datasets.md](docs/replay-datasets.md).
 
 ## On Kubernetes
 
 ```bash
-scripts/gen-prod-secrets.sh --out secrets.prod.yaml
+scripts/gen-prod-secrets.sh --out secrets.prod.yaml     # prints the admin login
 helm upgrade --install llm-bench deploy/helm/llm-bench -n llm-bench --create-namespace -f secrets.prod.yaml
+kubectl -n llm-bench port-forward svc/llm-bench-frontend 8080:80
 ```
 
+Open <http://localhost:8080> and sign in with the admin the script printed.
 [docs/deploying.md](docs/deploying.md) covers sizing, storage, the rolling
 dataset collector, upgrades that don't kill running benchmarks, and backups.
 
@@ -62,6 +72,11 @@ to LLMBench as a **service account** — seeded by the deployment, able to manag
 only the benchmarks it created. Setup is two values, one on each side:
 [Connecting LLM AutoTune](docs/deploying.md#connecting-llm-autotune). What it
 depends on is written down in [docs/api/for-autotune.md](docs/api/for-autotune.md).
+
+To see both working together, LLM AutoTune's
+[quickstart](https://github.com/modelsphere/llm-autotune#quickstart--both-platforms-no-gpus)
+installs this platform and AutoTune on one Kubernetes cluster, connects them,
+and runs a demo campaign, in one command and without GPUs.
 
 ## Documentation
 
