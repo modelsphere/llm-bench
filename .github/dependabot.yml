@@ -1,0 +1,48 @@
+version: 2
+updates:
+  # Backend (FastAPI, worker, benchmark modules): platform/backend/uv.lock.
+  # guidellm is pinned exactly on purpose; a bump must pass
+  # tests/modules/test_guidellm_measurement.py before it is merged.
+  - package-ecosystem: uv
+    directory: /platform/backend
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+        exclude-patterns: ["guidellm"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: npm
+    directory: /platform/frontend
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+
+  # Base images. Python and Node versions move with the project, not with
+  # Dependabot: only patch-level tags are proposed for them.
+  - package-ecosystem: docker
+    directories:
+      - /platform/backend
+      - /platform/frontend
+    schedule:
+      interval: monthly
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: "chore(deps)"
