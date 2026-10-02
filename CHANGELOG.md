@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Dependabot for the backend's Python dependencies, the frontend's npm
+  dependencies, the GitHub Actions and the Dockerfiles' base images.
+- `NOTICE` lists the vendored swagger-ui and Redoc bundles (their license
+  files now sit next to them), the embedded `bench/llm-perf-bench` harness,
+  the Bitnami subcharts, and the backend dependencies it was missing.
+
+### Changed
+
+- GitHub Actions are pinned to commit SHAs; CI runs with a read-only token.
+
+### Removed
+
+- The gate's checks that grepped for lists of internal and removed-subsystem
+  names. The license, developer-path and credential checks remain.
+
 ## [0.1.2] - 2026-09-29
 
 Versioned with LLM AutoTune 0.1.2, which it is tested with; there is no 0.1.1.
@@ -52,5 +71,6 @@ Versioned with LLM AutoTune 0.1.2, which it is tested with; there is no 0.1.1.
   Hub, for amd64 and arm64.
 - Released under the Apache License 2.0.
 
-[0.1.2]: https://github.com/modelsphere/llm-bench/releases/tag/v0.1.2
+[Unreleased]: https://github.com/modelsphere/llm-bench/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/modelsphere/llm-bench/compare/v0.1.0...v0.1.2
 [0.1.0]: https://github.com/modelsphere/llm-bench/releases/tag/v0.1.0

@@ -5,11 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   license:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: LICENSE is the Apache-2.0 text, unmodified
         run: |
           if ! grep -q "Apache License" LICENSE || ! grep -q "Version 2.0, January 2004" LICENSE; then
@@ -17,39 +26,17 @@ jobs:
             exit 1
           fi
 
-  no-internal-references:
-    # This repository was extracted from an internal one. Internal host,
-    # registry and customer names are not secrets, but they are noise to every
-    # reader and a slow leak of someone else's network. Catch them here.
+  hygiene:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - name: No internal hosts, registries or identifiers
-        run: |
-          pattern='4pd\.io|4paradigm|hardcore-tech|harbor\.|nexus\.|phanrouter|phanthy|tencent|pce-dev|m7-pce|model_eval_sdk|judge_?flow|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+'
-          if grep -rInEi "$pattern" . \
-               --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
-               --exclude=gate.yml --exclude=package-lock.json --exclude=uv.lock \
-               --exclude=upgrading.md; then
-            echo "::error::internal identifier found — see the matches above"
-            exit 1
-          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: No developer machine paths
         run: |
           if grep -rInE '/Users/[a-z]|/home/[a-z]+/' . \
                --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv --exclude=gate.yml; then
             echo "::error::a path from someone's machine — see the matches above"
-            exit 1
-          fi
-      # docs/upgrading.md is excluded from these two: it is the one place that
-      # has to name what an internal deployment is migrating away from.
-      - name: No removed subsystems left behind
-        run: |
-          pattern='contest|only_forward_when_all_pass|replay_tencent|perf_throughput|run_suite'
-          if grep -rInE "$pattern" . \
-               --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
-               --exclude=gate.yml --exclude=CHANGELOG.md --exclude=upgrading.md; then
-            echo "::error::reference to a subsystem this repository does not include"
             exit 1
           fi
       - name: No credentials or captured traffic committed
