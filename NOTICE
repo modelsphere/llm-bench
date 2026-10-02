@@ -19,8 +19,11 @@ Vendored in this repository
   (*.js.LICENSE.txt) are in the same directory.
 
   bench/llm-perf-bench — the multi-turn load generator the `agentic` module
-  drives, adapted from an earlier public project that carries no license file.
-  License: to be confirmed (待查).
+  drives, adapted from https://github.com/4paradigm/llm-perf-bench
+  (logger.py and simple_stats_display.py unchanged, the rest modified).
+  The upstream repository carries no license file. License: to be confirmed
+  (待查). Until that is resolved, these files are NOT covered by this
+  project's Apache-2.0 license.
 
   Bitnami PostgreSQL 16.7.27 and Redis 20.13.4 Helm charts
   (deploy/helm/llm-bench/charts/) ..... Apache-2.0

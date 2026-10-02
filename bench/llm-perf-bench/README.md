@@ -6,6 +6,10 @@ user replays a recorded conversation turn by turn, so the load has the shape of
 an agent session — growing context, think time between turns — rather than
 independent single requests.
 
+Adapted from <https://github.com/4paradigm/llm-perf-bench>, which carries no
+license file; see `NOTICE`. These files are not covered by this repository's
+Apache-2.0 license until that is resolved.
+
 It is embedded rather than installed so the module does not depend on an
 external package; the platform imports it from this directory.
 
