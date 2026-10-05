@@ -14,11 +14,11 @@ created by an earlier, internal version of LLMBench is **not** on this chain
 and cannot be upgraded in place. Differences you would otherwise trip over:
 
 - The contest-forwarding columns and their migrations do not exist.
-- The replay module is named `replay` (it was `replay_tencent`), in stored
-  benchmark configurations as well as results.
+- The replay module is named `replay` (it had a different name before), in
+  stored benchmark configurations as well as results.
 - Identities are created by `seed.py`, not by the migration; there is no
   default admin.
 
 To move data across, export each benchmark (`GET /benchmarks/admin/benchmarks/{id}/export`,
-renaming `replay_tencent` to `replay`) and import it into the new deployment.
+renaming the old replay module to `replay`) and import it into the new deployment.
 Submission history does not carry over.
