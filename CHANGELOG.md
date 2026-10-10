@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The chart's postgres starts on a freshly formatted block volume (Ceph RBD,
+  EBS, a persistent disk): it keeps its data in a `pgdata` subdirectory, as
+  initdb refuses a mount point holding `lost+found`. A database an earlier
+  chart initialised at the volume root stays where it is.
+
 ## [0.1.2] - 2026-09-29
 
 Versioned with LLM AutoTune 0.1.2, which it is tested with; there is no 0.1.1.
