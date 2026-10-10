@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.0] - 2026-10-10
+
+Versioned with LLM AutoTune 0.2.0, which it is tested with.
+
+### Changed
+
+- `perf_guidellm` samples a fixed number of requests, like the sweep module:
+  it stops after concurrency × `requests_per_concurrency` (default 20)
+  requests, with `max_seconds` as the cap. A fixed sample keeps a result's
+  precision the same however fast the endpoint is. Clear
+  `requests_per_concurrency` for the old duration-only test.
+
+### Fixed
+
+- The chart's postgres starts on a freshly formatted block volume (Ceph RBD,
+  EBS, a persistent disk): it keeps its data in a `pgdata` subdirectory, as
+  initdb refuses a mount point holding `lost+found`. A database an earlier
+  chart initialised at the volume root stays where it is.
+- The install notes give the frontend's NodePort when
+  `service.frontend.type` is `NodePort`, instead of telling you to
+  port-forward.
+
 ## [0.1.2] - 2026-09-29
 
 Versioned with LLM AutoTune 0.1.2, which it is tested with; there is no 0.1.1.
@@ -52,5 +76,7 @@ Versioned with LLM AutoTune 0.1.2, which it is tested with; there is no 0.1.1.
   Hub, for amd64 and arm64.
 - Released under the Apache License 2.0.
 
+[Unreleased]: https://github.com/modelsphere/llm-bench/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/modelsphere/llm-bench/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/modelsphere/llm-bench/releases/tag/v0.1.2
 [0.1.0]: https://github.com/modelsphere/llm-bench/releases/tag/v0.1.0

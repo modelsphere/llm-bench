@@ -41,9 +41,21 @@ class PerfGuidellmParams(BaseModel):
     concurrency: int = Field(default=5, ge=1, le=4096, description="Concurrent users / concurrency level")
     input_tokens: int = Field(default=50000, ge=1, le=1_000_000_000, description="Input tokens per request")
     output_tokens: int = Field(default=1500, ge=1, description="Max output tokens per request")
-    max_seconds: float = Field(default=300.0, ge=1.0, le=604800.0, description="Test duration in seconds")
+    max_seconds: float = Field(
+        default=300.0, ge=1.0, le=604800.0,
+        description="Duration cap in seconds; the whole test when requests_per_concurrency is empty",
+    )
     request_timeout: float = Field(default=120.0, ge=1.0, le=86400.0, description="Per-request timeout in seconds")
     warmup_seconds: float = Field(default=30.0, ge=0.0, le=86400.0, description="[guidellm] Warmup duration in seconds")
+    requests_per_concurrency: Optional[int] = Field(
+        default=20, ge=1, le=100_000,
+        description=(
+            "Target request count per concurrency slot: the test stops after "
+            "concurrency × this many requests, or at max_seconds, whichever comes "
+            "first. A fixed sample size keeps the measurement's precision the same "
+            "however fast the service is. Leave empty for a duration-only test."
+        ),
+    )
     dataset_path: Optional[str] = Field(
         default=None,
         description="[guidellm] Path to ShareGPT-format dataset file. Leave blank to use random tokens."
@@ -208,7 +220,9 @@ class PerfGuidellmModule(_GuidellmBudgetMixin, TestModule):
 
         progress_cb(0.05, f"Starting guidellm: concurrency={p.concurrency}, "
                          f"input={p.input_tokens}, output={p.output_tokens}, "
-                         f"duration={p.max_seconds}s")
+                         + (f"requests={p.concurrency * p.requests_per_concurrency} "
+                            f"(cap {p.max_seconds}s)" if p.requests_per_concurrency
+                            else f"duration={p.max_seconds}s"))
 
         metrics = self._run_guidellm(endpoint, p, output_dir, progress_cb, cancel_event)
 
@@ -243,6 +257,7 @@ class PerfGuidellmModule(_GuidellmBudgetMixin, TestModule):
             output_dir=output_dir,
             progress_cb=progress_cb,
             cancel_event=cancel_event,
+            requests_per_concurrency=getattr(p, "requests_per_concurrency", None),
             log_tag="perf_guidellm",
         )
 

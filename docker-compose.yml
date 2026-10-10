@@ -15,7 +15,7 @@
 # For a cluster, use the Helm chart in deploy/helm/llm-bench instead.
 
 x-backend: &backend
-  image: docker.io/4pdosc/llm-bench-backend:${LLMBENCH_VERSION:-0.1.2}
+  image: docker.io/4pdosc/llm-bench-backend:${LLMBENCH_VERSION:-0.2.0}
   build:
     context: .
     dockerfile: platform/backend/Dockerfile
@@ -100,7 +100,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: docker.io/4pdosc/llm-bench-frontend:${LLMBENCH_VERSION:-0.1.2}
+    image: docker.io/4pdosc/llm-bench-frontend:${LLMBENCH_VERSION:-0.2.0}
     build:
       context: platform/frontend
     ports:

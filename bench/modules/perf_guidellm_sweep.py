@@ -230,8 +230,9 @@ class PerfGuidellmSweepParams(BaseModel):
     max_seconds: float = Field(
         default=300.0, ge=1.0, le=604800.0,
         description=(
-            "[grid] Test duration PER concurrency level, in seconds. "
-            "[auto] Duration of the final confirmation run at the discovered level."
+            "[grid] Duration cap PER concurrency level, in seconds; the level's "
+            "whole duration when requests_per_concurrency is empty. "
+            "[auto] The same, for the final confirmation run at the discovered level."
         ),
     )
     request_timeout: float = Field(default=120.0, ge=1.0, le=86400.0, description="Per-request timeout in seconds")

@@ -57,12 +57,21 @@ spec:
         - name: postgres
           image: "{{ .Values.postgres.image.registry }}/{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
           imagePullPolicy: {{ .Values.image.backend.pullPolicy }}
-          # Override CMD only (not the entrypoint), so docker-entrypoint.sh still
-          # runs initdb/startup, then execs the server with our tuning.
+          # The data lives one level below the mount point: a freshly formatted
+          # block volume (ext4 on Ceph RBD, EBS, a PD) has lost+found at its
+          # root, and initdb refuses a non-empty directory. A database already
+          # initialised at the root, by an earlier version of this chart, stays
+          # where it is. docker-entrypoint.sh still runs initdb/startup, then
+          # execs the server with our tuning.
+          command: ["sh", "-c"]
           args:
-            - "postgres"
-            - "-c"
-            - "max_connections={{ .Values.postgres.maxConnections }}"
+            - |
+              if [ -s /var/lib/postgresql/data/PG_VERSION ]; then
+                export PGDATA=/var/lib/postgresql/data
+              else
+                export PGDATA=/var/lib/postgresql/data/pgdata
+              fi
+              exec docker-entrypoint.sh postgres -c max_connections={{ .Values.postgres.maxConnections }}
           env:
             - name: POSTGRES_DB
               value: {{ .Values.postgres.database | quote }}
