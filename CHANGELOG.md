@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-10
+
+Versioned with LLM AutoTune 0.2.0, which it is tested with.
+
 ### Changed
 
 - `perf_guidellm` samples a fixed number of requests, like the sweep module:
@@ -72,5 +76,7 @@ Versioned with LLM AutoTune 0.1.2, which it is tested with; there is no 0.1.1.
   Hub, for amd64 and arm64.
 - Released under the Apache License 2.0.
 
+[Unreleased]: https://github.com/modelsphere/llm-bench/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/modelsphere/llm-bench/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/modelsphere/llm-bench/releases/tag/v0.1.2
 [0.1.0]: https://github.com/modelsphere/llm-bench/releases/tag/v0.1.0
