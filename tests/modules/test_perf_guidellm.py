@@ -144,3 +144,27 @@ def test_sweep_only_metrics_stay_out_of_the_single_module():
     }
     # Everything else the sweep declares, the single module declares too
     assert single - sweep == set()
+
+
+@pytest.mark.parametrize("per_slot", [20, None])
+def test_a_level_stops_at_a_request_count_unless_cleared(monkeypatch, tmp_path, per_slot):
+    """Like the sweep: concurrency x requests_per_concurrency requests, with
+    max_seconds as the cap; cleared, the duration alone bounds the test."""
+    import bench.modules.perf_guidellm as perf
+
+    seen = {}
+
+    def fake_load(endpoint, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(perf, "run_guidellm_load", fake_load)
+    cls = get_module("perf_guidellm")
+    params = cls.ParamsSchema(concurrency=4, requests_per_concurrency=per_slot)
+    cls()._run_guidellm(None, params, str(tmp_path), lambda *a: None, None)
+    assert seen["requests_per_concurrency"] == per_slot
+    assert seen["max_seconds"] == params.max_seconds
+
+
+def test_requests_per_concurrency_defaults_to_a_count():
+    assert get_module("perf_guidellm").ParamsSchema().requests_per_concurrency == 20

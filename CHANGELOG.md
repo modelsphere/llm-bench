@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `perf_guidellm` samples a fixed number of requests, like the sweep module:
+  it stops after concurrency × `requests_per_concurrency` (default 20)
+  requests, with `max_seconds` as the cap. A fixed sample keeps a result's
+  precision the same however fast the endpoint is. Clear
+  `requests_per_concurrency` for the old duration-only test.
+
 ### Fixed
 
 - The chart's postgres starts on a freshly formatted block volume (Ceph RBD,
