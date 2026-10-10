@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   EBS, a persistent disk): it keeps its data in a `pgdata` subdirectory, as
   initdb refuses a mount point holding `lost+found`. A database an earlier
   chart initialised at the volume root stays where it is.
+- The install notes give the frontend's NodePort when
+  `service.frontend.type` is `NodePort`, instead of telling you to
+  port-forward.
 
 ## [0.1.2] - 2026-09-29
 

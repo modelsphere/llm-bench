@@ -19,6 +19,12 @@ Ingress:
 {{- range .Values.ingress.hosts }}
   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
 {{- end }}
+{{- else if eq .Values.service.frontend.type "NodePort" }}
+
+The frontend is on a NodePort of every node:
+  kubectl get svc -n {{ .Release.Namespace }} {{ include "llm-bench.fullname" . }}-frontend -o jsonpath='{.spec.ports[0].nodePort}'
+
+Then open http://<node address>:<that port>
 {{- else }}
 
 No ingress enabled. Access the frontend via port-forward:
