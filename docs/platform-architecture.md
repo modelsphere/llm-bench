@@ -49,6 +49,7 @@ alembic/versions/
                 card-type list and test_modules (from
                 bench.modules.MODULE_REGISTRY). Later schema changes are new
                 revisions on top; CI keeps models and migrations in agreement.
+  002_profile_owner   Collection profiles record who created them.
 seed.py         Run after migrating: the first admin (from required env —
                 there is no default password), the perf-suite-v1 benchmark
                 (from benchmarks/perf-suite-v1.yaml), and optionally a

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A service account creates collection profiles and manages the ones it
+  created, as with benchmarks (migration `002_profile_owner`); profiles report
+  `created_by_user_id`. LLM AutoTune's **Datasets** page uses this.
+- `POST /replay-datasets/probe` counts what an unsaved source and filters
+  match, and `POST /replay-datasets/values` lists the models or backends a
+  store has seen, with request counts, so an editor can offer them.
+
+### Changed
+
+- A `forwarded_to` filter without a port matches every port on that host.
+  On VictoriaLogs it now also matches the backend with or without a scheme,
+  and in `peer`, as the file source already did.
+
+### Fixed
+
+- Listing profiles failed once a VictoriaLogs profile existed: responses
+  left out `source_type`, so the URL failed the file source's validation.
+- A VictoriaLogs probe reports the sample's prompt tokens, read from the
+  flattened `resp_meta.usage.prompt_tokens`.
+
 ## [0.2.0] - 2026-10-10
 
 Versioned with LLM AutoTune 0.2.0, which it is tested with.

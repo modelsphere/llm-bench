@@ -38,7 +38,7 @@ from bench.replay_test import jsonl_io
 from bench.replay_test.bodylog_convert import unflatten
 
 from app.datasets.errors import LogSourceError
-from app.datasets.victorialogs import LogFilters, VictoriaLogsClient, build_query
+from app.datasets.victorialogs import LogFilters, VictoriaLogsClient, backend_address, build_query
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,12 @@ class LogSource(Protocol):
         """{matched, query, sample_fields, sample_prompt_tokens} for the admin
         editor's "Test" button — a filter that matches nothing shows up there
         as `matched: 0` rather than hours later as an empty build."""
+
+    def top_values(
+        self, filters: LogFilters, start: datetime, end: datetime, fieldname: str, limit: int = 50,
+    ) -> list[tuple[str, int]]:
+        """The most common `model` or `forwarded_to` values among the matching
+        records, with counts, most common first."""
 
     def close(self) -> None: ...
 
@@ -88,6 +94,9 @@ class VictoriaLogsSource:
     def probe(self, filters, start, end):
         return self.client.probe(filters, start, end)
 
+    def top_values(self, filters, start, end, fieldname, limit=50):
+        return self.client.top_values(filters, start, end, fieldname, limit)
+
     def close(self):
         self.client.close()
 
@@ -95,16 +104,6 @@ class VictoriaLogsSource:
 # ---------------------------------------------------------------------------
 # The bodylog listener's files
 # ---------------------------------------------------------------------------
-
-
-def _norm_peer(value: object) -> str:
-    """`http://198.51.100.20:8052/` and `198.51.100.20:8052` name the same
-    backend. The listener records `forwarded_to` only when an upstream router
-    reports the real backend, and `peer` otherwise, in either form."""
-    s = str(value or "").strip().rstrip("/")
-    if "://" in s:
-        s = urlparse(s).netloc or s
-    return s.lower()
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -133,6 +132,32 @@ def _model_of(record: dict) -> str:
     return ""
 
 
+def _backend_matches(wanted: list[str], record: dict) -> bool:
+    """Is the record's backend one of these? A wanted host without a port
+    matches every port on that host, as on VictoriaLogs."""
+    seen = {
+        (host.lower(), port)
+        for host, port in (backend_address(record.get("forwarded_to")),
+                           backend_address(record.get("peer")))
+        if host
+    }
+    for value in wanted:
+        host, port = backend_address(value)
+        host = host.lower()
+        if any(h == host and (not port or p == port) for h, p in seen):
+            return True
+    return False
+
+
+def _backend_of(record: dict) -> str:
+    """`host:port` of the backend that served the record, as an editor shows it."""
+    for value in (record.get("forwarded_to"), record.get("peer")):
+        host, port = backend_address(value)
+        if host:
+            return f"{host}:{port}" if port else host
+    return ""
+
+
 def matches(record: dict, filters: LogFilters) -> bool:
     """The file source's reading of the same filters VictoriaLogs turns into
     LogsQL: values within a field OR-ed, fields AND-ed, empty means no clause."""
@@ -144,11 +169,8 @@ def matches(record: dict, filters: LogFilters) -> bool:
             return False
     if filters.exclude_truncated and str(record.get("req_body_truncated", "")).lower() in ("true", "1"):
         return False
-    if filters.forwarded_to:
-        wanted = {_norm_peer(v) for v in filters.forwarded_to}
-        seen = {_norm_peer(record.get("forwarded_to")), _norm_peer(record.get("peer"))}
-        if not wanted & seen:
-            return False
+    if filters.forwarded_to and not _backend_matches(filters.forwarded_to, record):
+        return False
     if filters.models and _model_of(record) not in set(filters.models):
         return False
     return True
@@ -277,6 +299,15 @@ class BodylogFilesSource:
             "sample_fields": sorted(sample.keys()) if sample else [],
             "sample_prompt_tokens": prompt_tokens,
         }
+
+    def top_values(self, filters, start, end, fieldname, limit=50):
+        read = _model_of if fieldname == "model" else _backend_of
+        counts: dict[str, int] = {}
+        for record in self.iter_window(filters, start, end):
+            value = read(record)
+            if value:
+                counts[value] = counts.get(value, 0) + 1
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
 
     def close(self):
         pass

@@ -115,10 +115,10 @@ The platform exposes a REST API for queries and submissions. All endpoints retur
 | Public (no auth) | `GET /health`, `GET /metrics`, `GET /modules`, `GET /modules/{name}` |
 | Requires login | `/benchmarks*`, `/leaderboard/*`, `/submissions/*`, `GET /auth/me` |
 | Admin, or a service account on its own benchmarks | `/benchmarks/admin/benchmarks` (create, import, list, update, lock, export, delete) |
-| Admin, or a service account | `/replay-datasets` reads and `POST /replay-datasets/profiles/{id}/build` |
-| Admin only | `/auth/admin/*`, `/card-types` writes, `/benchmarks/admin/benchmarks/group-tags`, collection-profile edits, `GET /admin/version` |
+| Admin, or a service account on its own profiles | `/replay-datasets` reads, builds, `POST /replay-datasets/probe` and `/values`; creating profiles, and changing, probing or deleting its own |
+| Admin only | `/auth/admin/*`, `/card-types` writes, `/benchmarks/admin/benchmarks/group-tags`, other accounts' collection profiles, frozen datasets and build downloads, `GET /admin/version` |
 
-**Roles.** `user` submits and reads. `admin` manages everything. `super_admin` also manages roles. `service` is an automation account — another platform such as LLM AutoTune — created by the deployment (`seed.py`, from `SERVICE_USERNAME` + `SERVICE_API_KEY`), never granted from the UI. It manages only the benchmarks it created, may read and trigger rolling-dataset builds, may call the preflight endpoints with its API key, and is exempt from the per-user active-submission cap because the platform behind it bounds its own concurrency.
+**Roles.** `user` submits and reads. `admin` manages everything. `super_admin` also manages roles. `service` is an automation account — another platform such as LLM AutoTune — created by the deployment (`seed.py`, from `SERVICE_USERNAME` + `SERVICE_API_KEY`), never granted from the UI. It manages only the benchmarks and collection profiles it created, may read and trigger rolling-dataset builds, may call the preflight endpoints with its API key, and is exempt from the per-user active-submission cap because the platform behind it bounds its own concurrency.
 
 ### System
 

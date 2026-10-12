@@ -151,6 +151,24 @@ def test_backend_filter_accepts_either_spelling_of_the_same_backend():
     assert not matches(record(0, T0, peer="198.51.100.21:8052"), f)
 
 
+def test_a_host_without_a_port_matches_every_port_on_it():
+    f = LogFilters(forwarded_to=["198.51.100.20"])
+    assert matches(record(0, T0), f)                                       # peer :8052
+    assert matches(record(0, T0, forwarded_to="http://198.51.100.20:30000"), f)
+    assert not matches(record(0, T0, peer="198.51.100.2:8052"), f)
+
+
+def test_top_values_counts_models_and_backends(tmp_path):
+    rows = [record(i, T0 + timedelta(minutes=i)) for i in range(3)]
+    rows.append(record(3, T0 + timedelta(minutes=3), peer="198.51.100.21:8052",
+                       resp_meta={"model": "glm-5.2"}))
+    write_hour(tmp_path, T0, rows)
+    source, end = BodylogFilesSource(tmp_path), T0 + timedelta(hours=1)
+    assert source.top_values(LogFilters(), T0, end, "model") == [("glm-5", 3), ("glm-5.2", 1)]
+    assert source.top_values(LogFilters(models=["glm-5"]), T0, end, "forwarded_to") == [
+        ("198.51.100.20:8052", 3)]
+
+
 def test_status_uri_and_truncation_filters():
     assert not matches(record(0, T0, status=429), LogFilters())
     assert matches(record(0, T0, uri="/v1/chat/completions?x=1"), LogFilters())

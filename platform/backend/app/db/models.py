@@ -553,6 +553,12 @@ class ReplayDatasetProfile(Base):
     # hourly builds with a 72h floor retain 72 builds, not 7.
     min_retain_hours: Mapped[float] = mapped_column(Float, default=8.0, server_default=text("8.0"))
 
+    # Who created it. A service account (another platform, such as LLM
+    # AutoTune) manages only the profiles it created; admins manage all. Null
+    # for profiles made before this was recorded, and when the creator is gone.
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, onupdate=func.now()

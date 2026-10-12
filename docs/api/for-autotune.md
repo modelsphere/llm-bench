@@ -24,8 +24,10 @@ A service account may:
 | create, import, update, lock, export and delete benchmarks | only ones it created (`created_by_user_id` = itself); others answer 403 |
 | list benchmarks in the admin view | sees only its own |
 | read collection profiles and builds, trigger a build | yes |
+| create, update, probe and delete collection profiles | only ones it created (`created_by_user_id` = itself); others answer 403 |
+| try unsaved filters (`POST /replay-datasets/probe`), list the models and backends a store has seen (`POST /replay-datasets/values`) | yes |
 | call `POST /submissions/preflight` with its key | yes (a person's key may not) |
-| create or edit profiles, freeze datasets, manage users or card types | no |
+| freeze or download datasets, manage users or card types | no |
 
 ## Routes
 
@@ -40,8 +42,10 @@ A service account may:
 | `POST /submissions/benchmarks/{slug}/submit` | One run. Returns `202` with `id`. |
 | `GET /submissions/{id}` | Polling it. |
 | `POST /submissions/{id}/cancel` | Giving up on it. `409` once it is already terminal. |
-| `GET /replay-datasets/profiles`, `…/profiles/{id}/builds`, `…/builds/{id}` | Pinning a campaign to one rolling-dataset build. |
+| `GET /replay-datasets/profiles`, `…/profiles/{id}/builds`, `…/builds/{id}` | Pinning a campaign to one rolling-dataset build, and listing datasets with their latest build (`created_by_user_id` tells AutoTune's own from anyone else's). |
 | `POST /replay-datasets/profiles/{id}/build` | Asking for a fresh build. `409` while one is already running. |
+| `POST /replay-datasets/profiles`, `PUT` and `DELETE …/profiles/{id}` | AutoTune's **Datasets** page, which creates VictoriaLogs profiles with `schedule_interval_hours: 0` and rebuilds them itself, so a rebuild never lands under a running campaign. |
+| `POST /replay-datasets/probe`, `POST /replay-datasets/values` | The same page's form: how many requests the filters match, and which models and backends to offer. |
 
 **Busy is not failure.** `429` (active-submission cap — not applied to service
 accounts) and `503` (a cordon during a disruptive upgrade) mean "try again

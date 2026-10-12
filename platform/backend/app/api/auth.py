@@ -231,17 +231,17 @@ async def require_service_or_admin(user: User = Depends(get_current_user)) -> Us
     return user
 
 
-def ensure_can_manage(user: User, benchmark) -> None:
-    """An admin manages every benchmark; a service account only the ones it
-    created. Raises 403 naming the rule, so an automated caller that trips it
-    gets an answer rather than a bare refusal."""
+def ensure_can_manage(user: User, item, what: str = "benchmarks") -> None:
+    """An admin manages every benchmark or collection profile; a service account
+    only the ones it created. Raises 403 naming the rule, so an automated caller
+    that trips it gets an answer rather than a bare refusal."""
     if is_admin_or_above(user.role):
         return
-    if user.role == UserRole.SERVICE and benchmark.created_by_user_id == user.id:
+    if user.role == UserRole.SERVICE and item.created_by_user_id == user.id:
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="A service account may manage only the benchmarks it created",
+        detail=f"A service account may manage only the {what} it created",
     )
 
 

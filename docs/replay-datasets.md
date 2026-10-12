@@ -67,10 +67,10 @@ not the contract.
 
 ## 0. Auth
 
-Creating, editing, probing and freezing profiles is admin-only. Reading
-profiles and builds, and triggering a build, is also open to a **service
-account** — how another platform such as LLM AutoTune pins a campaign to a
-fresh build without holding admin rights.
+Admins manage every profile. A **service account**, which is how another
+platform such as LLM AutoTune signs in, reads every profile and build,
+triggers builds, and creates profiles of its own: it edits, probes and deletes
+only the ones it created, as with benchmarks. Freezing datasets is admin-only.
 
 ```bash
 API=http://localhost:8080/api          # through the frontend; see the README
@@ -135,7 +135,8 @@ Filter semantics worth knowing:
   OR-ed; different fields are AND-ed.
 - `forwarded_to` is how you pin the dataset to a single backend. It matches
   the record's `forwarded_to` (set when an upstream router reports the real
-  backend) or its `peer`, with or without a scheme.
+  backend) or its `peer`, with or without a scheme. A host without a port
+  (`198.51.100.20`) matches every port on that host.
 - On VictoriaLogs, filter on fields, never on `_msg`: `_msg:glm-5` is a token
   match that also hits `glm-5.2`. The profile's filters always compile to exact
   field matches; `extra_logsql` is where that mistake could come back.
@@ -173,6 +174,23 @@ cause, or, for files, a `fileTimezone` that does not match the listener's.
 Cheaper to find here than as an empty build later. `error` is set instead when
 the source cannot be read (directory not mounted, store rejected the query).
 The file source scans every line in the window, so probe a short one.
+
+Before a profile exists, the same check takes the source and filters in the
+body, and a second call lists the values the store has seen, so an editor can
+offer them:
+
+```bash
+curl -s -X POST "$API/replay-datasets/probe" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"source_type": "victorialogs", "source_url": "http://victorialogs:9428",
+       "models": ["glm-5"], "hours": 24}'
+
+# the models seen in the last 24 h, most requests first; with "field": "forwarded_to"
+# and a "models" filter, the backends serving one model (as host:port)
+curl -s -X POST "$API/replay-datasets/values" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"source_type": "victorialogs", "source_url": "http://victorialogs:9428",
+       "field": "model", "hours": 24}'
+# → {"values": [{"value": "glm-5", "count": 85211}, ...], "query": "...", "error": null}
+```
 
 ## 3. Trigger a build
 
@@ -447,12 +465,14 @@ curl -sf "$API/replay-datasets/profiles/$ID" -H "$AUTH" \
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/replay-datasets/profiles` | list profiles, each with its `current` build |
-| POST | `/replay-datasets/profiles` | create (admin) |
+| POST | `/replay-datasets/profiles` | create |
 | GET | `/replay-datasets/profiles/{id}` | one profile + `current` (hash, records, summary) |
-| PUT | `/replay-datasets/profiles/{id}` | update (partial; `name` is immutable) (admin) |
-| DELETE | `/replay-datasets/profiles/{id}` | delete policy + history; dataset FILES are left on disk (admin) |
+| PUT | `/replay-datasets/profiles/{id}` | update (partial; `name` is immutable) (owner) |
+| DELETE | `/replay-datasets/profiles/{id}` | delete policy + history; dataset FILES are left on disk (owner) |
 | POST | `/replay-datasets/profiles/{id}/build` | trigger a build → `build_row_id` |
-| POST | `/replay-datasets/profiles/{id}/probe` | count what the filters match in the last N hours (admin) |
+| POST | `/replay-datasets/profiles/{id}/probe` | count what the filters match in the last N hours (owner) |
+| POST | `/replay-datasets/probe` | the same count for an unsaved source and filters |
+| POST | `/replay-datasets/values` | the most common `model` or `forwarded_to` values the store has seen |
 | GET | `/replay-datasets/profiles/{id}/builds` | build history (`?limit=`, newest first) |
 | GET | `/replay-datasets/builds/{id}` | one build by the id the trigger returned |
 | GET | `/replay-datasets/profiles/{id}/builds/{build_row_id}/download` | download the build's dataset file as published (`?token=` accepted; 404 once pruned) |
@@ -462,5 +482,7 @@ curl -sf "$API/replay-datasets/profiles/$ID" -H "$AUTH" \
 | GET | `/replay-datasets/frozen` | list frozen datasets, each with the benchmarks (`used_by`) that replay it |
 | DELETE | `/replay-datasets/frozen/{name}` | delete a frozen dataset (`?force=true` to override the in-use guard) |
 
-Everything not marked admin is also open to a service account. Freezing and
-deleting frozen datasets are admin-only.
+Profiles, builds, probes and values are open to admins and service accounts;
+*owner* means an admin, or the service account that created the profile.
+Downloading a build, freezing one, and listing or deleting frozen datasets are
+admin-only.

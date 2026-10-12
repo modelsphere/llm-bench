@@ -35,20 +35,44 @@ def source_errors(source_type: str, source_url: str, extra_logsql: str | None) -
     return out
 
 
-class ProfileBase(BaseModel):
-    display_name: str = Field(min_length=1, max_length=200)
-    description: str | None = Field(default=None, max_length=2000)
-    enabled: bool = True
+class ProfileSource(BaseModel):
+    """Where records come from and which of them match: the part of a profile
+    that can be tried against the store before anything is saved."""
 
     # source — see app.datasets.sources
     source_type: SourceType = "bodylog_files"
     source_url: str = Field(min_length=1, max_length=500)
     models: list[str] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=lambda: ["200"])
+    # A backend, with or without a scheme. A host without a port matches every
+    # port on that host.
     forwarded_to: list[str] = Field(default_factory=list)
     uris: list[str] = Field(default_factory=lambda: ["/v1/chat/completions"])
     exclude_truncated: bool = True
     extra_logsql: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("models", "forwarded_to", "uris", "statuses")
+    @classmethod
+    def _clean_filter_list(cls, v: list[str]) -> list[str]:
+        return [item.strip() for item in v if isinstance(item, str) and item.strip()]
+
+    @field_validator("source_url")
+    @classmethod
+    def _strip_url(cls, v: str) -> str:
+        return v.strip().rstrip("/")
+
+    @model_validator(mode="after")
+    def _source_is_usable(self):
+        errors = source_errors(self.source_type, self.source_url, self.extra_logsql)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self
+
+
+class ProfileBase(ProfileSource):
+    display_name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    enabled: bool = True
 
     # window + sampling
     window_hours: int = Field(default=24, ge=1, le=24 * 30)
@@ -83,24 +107,12 @@ class ProfileBase(BaseModel):
     keep_builds: int = Field(default=7, ge=1, le=100)
     min_retain_hours: float = Field(default=8.0, ge=0.0)
 
-    @field_validator("models", "forwarded_to", "uris", "statuses", "header_denylist")
+    @field_validator("header_denylist")
     @classmethod
     def _clean_list(cls, v: list[str] | None) -> list[str] | None:
         if v is None:
             return None
         return [item.strip() for item in v if isinstance(item, str) and item.strip()]
-
-    @field_validator("source_url")
-    @classmethod
-    def _strip_url(cls, v: str) -> str:
-        return v.strip().rstrip("/")
-
-    @model_validator(mode="after")
-    def _source_is_usable(self):
-        errors = source_errors(self.source_type, self.source_url, self.extra_logsql)
-        if errors:
-            raise ValueError("; ".join(errors))
-        return self
 
 
 class ProfileCreate(ProfileBase):
@@ -209,6 +221,8 @@ class CurrentBuild(BaseModel):
 class ProfileResponse(ProfileBase):
     id: int
     name: str
+    # The account that created it; a service account manages only its own.
+    created_by_user_id: int | None = None
     created_at: datetime
     updated_at: datetime | None = None
     current: CurrentBuild | None = None
@@ -237,6 +251,35 @@ class ProbeResponse(BaseModel):
     query: str
     sample_fields: list[str] = Field(default_factory=list)
     sample_prompt_tokens: int | None = None
+    error: str | None = None
+
+
+class DraftProbeRequest(ProfileSource):
+    """Count what an unsaved profile's filters match, so an editor can show it
+    before the profile exists."""
+
+    hours: float = Field(default=1.0, ge=0.1, le=24.0)
+
+
+class ValuesRequest(ProfileSource):
+    """Which values of one field the matching records carry: the models and
+    backends the store has seen, offered by an editor instead of asking for a
+    name. Usually sent with no `models` filter for `model`, and with the chosen
+    model for `forwarded_to`."""
+
+    field: Literal["model", "forwarded_to"]
+    hours: float = Field(default=24.0, ge=0.1, le=24.0 * 7)
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+class ValueCount(BaseModel):
+    value: str
+    count: int
+
+
+class ValuesResponse(BaseModel):
+    values: list[ValueCount] = Field(default_factory=list)
+    query: str = ""
     error: str | None = None
 
 

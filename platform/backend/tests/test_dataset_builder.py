@@ -21,7 +21,13 @@ from app.datasets.builder import (
     profile_from_dict,
     window_bounds,
 )
-from app.datasets.victorialogs import LogFilters, build_query, escape_value
+from app.datasets.victorialogs import (
+    LogFilters,
+    VictoriaLogsClient,
+    backend_address,
+    build_query,
+    escape_value,
+)
 
 REQ_BODY = json.dumps({"model": "glm-5", "messages": [{"role": "user", "content": "hi"}],
                        "max_tokens": 64})
@@ -104,11 +110,84 @@ def test_build_query_uses_exact_field_filters():
     )
     assert '_time:[2026-08-04T00:00:00Z, 2026-08-04T01:00:00Z)' in q
     assert 'model:="glm-5"' in q
-    assert 'forwarded_to:="http://198.51.100.20:8052"' in q
+    assert 'forwarded_to:in("http://198.51.100.20:8052", ' in q
     assert 'status:="200"' in q
     assert 'req_body_truncated:="false"' in q
     assert q.endswith("| limit 30")
     assert "_msg:" not in q
+
+
+def test_a_backend_matches_in_any_spelling_and_in_peer():
+    """A backend may be recorded with or without a scheme, and in `peer` when
+    no router reported the real one — the same reading as the file source."""
+    clause = LogFilters(forwarded_to=["198.51.100.20:8052/"], statuses=[], uris=[],
+                        exclude_truncated=False).clauses()
+    assert clause == [
+        '(forwarded_to:in("http://198.51.100.20:8052", "https://198.51.100.20:8052", "198.51.100.20:8052")'
+        ' OR peer:in("http://198.51.100.20:8052", "https://198.51.100.20:8052", "198.51.100.20:8052"))'
+    ]
+
+
+def test_a_host_without_a_port_matches_every_port_on_it():
+    (clause,) = LogFilters(forwarded_to=["http://198.51.100.20"], statuses=[], uris=[],
+                           exclude_truncated=False).clauses()
+    assert 'forwarded_to:="http://198.51.100.20:"*' in clause
+    assert 'forwarded_to:="198.51.100.20:"*' in clause
+    assert 'peer:="198.51.100.20:"*' in clause
+    # The prefix ends at the colon, so 198.51.100.2 does not match 198.51.100.20.
+    assert '"198.51.100.20"*' not in clause
+
+
+def test_backend_address_reads_every_spelling():
+    assert backend_address("http://198.51.100.20:8052/") == ("198.51.100.20", "8052")
+    assert backend_address("198.51.100.20:8052") == ("198.51.100.20", "8052")
+    assert backend_address("198.51.100.20") == ("198.51.100.20", "")
+    assert backend_address("https://node-3.example.com") == ("node-3.example.com", "")
+    assert backend_address("") == ("", "")
+
+
+class StatsClient(VictoriaLogsClient):
+    """A client whose store answers every query with these rows."""
+
+    def __init__(self, rows):
+        super().__init__(base_url="http://victorialogs:9428")
+        self.rows, self.queries = rows, []
+
+    def iter_rows(self, query):
+        self.queries.append(query)
+        yield from self.rows
+
+
+def test_top_values_counts_one_field_most_common_first():
+    client = StatsClient([{"model": "glm-5", "n": "120"}, {"model": "", "n": "7"},
+                          {"model": "qwen3", "n": "40"}])
+    start = datetime(2026, 8, 4, 0, tzinfo=timezone.utc)
+    out = client.top_values(LogFilters(), start, start + timedelta(hours=24), "model", limit=10)
+    assert out == [("glm-5", 120), ("qwen3", 40)]
+    assert client.queries[0].endswith("| stats by (model) count() as n | sort by (n desc) | limit 10")
+
+
+def test_top_backends_are_read_as_host_and_port_and_fall_back_to_peer():
+    start = datetime(2026, 8, 4, 0, tzinfo=timezone.utc)
+    client = StatsClient([{"forwarded_to": "http://198.51.100.20:8052", "n": "5"},
+                          {"forwarded_to": "198.51.100.20:8052", "n": "2"},
+                          {"forwarded_to": "http://198.51.100.21:8052", "n": "4"}])
+    out = client.top_values(LogFilters(), start, start + timedelta(hours=1), "forwarded_to")
+    assert out == [("198.51.100.20:8052", 7), ("198.51.100.21:8052", 4)]
+
+    peers = StatsClient([])
+    peers.iter_rows = lambda q: iter([{"peer": "198.51.100.22:30000", "n": "3"}] if "(peer)" in q else [])
+    out = peers.top_values(LogFilters(), start, start + timedelta(hours=1), "forwarded_to")
+    assert out == [("198.51.100.22:30000", 3)]
+
+
+def test_probe_reads_prompt_tokens_from_the_flattened_usage():
+    client = StatsClient([{"n": "3"}])
+    client.iter_rows = lambda query: iter([{"n": "3"}] if "count()" in query else [vl_row(prompt_tokens=812)])
+    start = datetime(2026, 8, 4, 0, tzinfo=timezone.utc)
+    out = client.probe(LogFilters(), start, start + timedelta(hours=1))
+    assert out["matched"] == 3
+    assert out["sample_prompt_tokens"] == 812
 
 
 def test_build_query_ors_multiple_values_of_one_field():

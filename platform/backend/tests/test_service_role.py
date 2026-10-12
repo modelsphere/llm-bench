@@ -2,10 +2,11 @@
 
 LLM AutoTune (or any automation) talks to LLMBench as a service account whose
 API key the deployment seeds. It needs to create and lock the benchmarks it runs,
-read and trigger the rolling datasets it pins, and preflight an endpoint before
-committing a submission. It must not become an admin by another name: it may
-not touch a benchmark somebody else created, see other people's benchmarks in
-the admin list, edit collection profiles, or manage users.
+create and manage its own rolling-dataset profiles, read and trigger the ones it
+pins, and preflight an endpoint before committing a submission. It must not
+become an admin by another name: it may not touch a benchmark or a profile
+somebody else created, see other people's benchmarks in the admin list, freeze
+datasets, or manage users.
 
 Every call here authenticates the way the other platform does — with its API
 key, not a website session.
@@ -194,19 +195,91 @@ def test_group_tags_remain_admin_only(client):
     assert resp.status_code == 403
 
 
-# --- rolling datasets: read and trigger, never configure --------------------------------
+# --- rolling datasets: its own profiles, never anyone else's ---------------------------
 
 
-def test_a_service_account_reads_profiles_but_cannot_edit_them(client):
+def _profile_body(**overrides) -> dict:
+    body = {"name": f"p{uuid.uuid4().hex[:6]}", "display_name": "x",
+            "source_type": "victorialogs", "source_url": "http://victorialogs:9428",
+            "models": ["glm-5"], "schedule_interval_hours": 0}
+    body.update(overrides)
+    return body
+
+
+def test_a_service_account_creates_and_manages_its_own_profiles(client):
     svc = _mk_user(UserRole.SERVICE)
     headers = _key_header(svc)
     assert client.get("/replay-datasets/profiles", headers=headers).status_code == 200
-    created = client.post("/replay-datasets/profiles", headers=headers, json={
-        "name": f"p{uuid.uuid4().hex[:6]}", "display_name": "x",
-        "source_type": "bodylog_files", "source_url": "file:///data/bodylog",
-    })
-    assert created.status_code == 403
+    created = client.post("/replay-datasets/profiles", headers=headers, json=_profile_body())
+    assert created.status_code == 201, created.text
+    profile = created.json()
+    assert profile["created_by_user_id"] == svc.id
+    pid = profile["id"]
+    edited = client.put(f"/replay-datasets/profiles/{pid}", headers=headers,
+                        json={"sample_size": 500, "forwarded_to": ["198.51.100.20"]})
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["sample_size"] == 500
+    assert client.delete(f"/replay-datasets/profiles/{pid}", headers=headers).status_code == 204
+
+
+def test_a_service_account_cannot_touch_someone_elses_profile(client):
+    admin, svc = _mk_user(UserRole.ADMIN), _mk_user(UserRole.SERVICE)
+    theirs = client.post("/replay-datasets/profiles", headers=_jwt_header(admin), json=_profile_body())
+    assert theirs.status_code == 201, theirs.text
+    pid, headers = theirs.json()["id"], _key_header(svc)
+    put = client.put(f"/replay-datasets/profiles/{pid}", headers=headers, json={"sample_size": 1})
+    assert put.status_code == 403
+    assert "collection profiles it created" in put.json()["detail"]
+    assert client.delete(f"/replay-datasets/profiles/{pid}", headers=headers).status_code == 403
+    assert client.post(f"/replay-datasets/profiles/{pid}/probe", headers=headers,
+                       json={"hours": 1}).status_code == 403
+    # Freezing datasets stays an admin's job.
     assert client.get("/replay-datasets/frozen", headers=headers).status_code == 403
+
+
+def test_an_ordinary_user_cannot_create_profiles(client):
+    user = _mk_user(UserRole.USER)
+    created = client.post("/replay-datasets/profiles", headers=_jwt_header(user), json=_profile_body())
+    assert created.status_code == 403
+
+
+def test_filters_are_tried_and_values_read_before_a_profile_exists(client, tmp_path):
+    """The editor's two questions about an unsaved profile: what does it match,
+    and which models and backends are there to choose from."""
+    from datetime import datetime, timedelta, timezone
+    import json
+
+    now = datetime.now(timezone.utc)
+    for i, (model, peer) in enumerate([("glm-5", "198.51.100.20:8052")] * 3
+                                      + [("qwen3", "198.51.100.21:30000")]):
+        ts = now - timedelta(minutes=5 + i)
+        day = tmp_path / ts.strftime("%Y-%m-%d")
+        day.mkdir(exist_ok=True)
+        with (day / f"{ts:%H}.jsonl").open("a") as hour_file:
+            hour_file.write(json.dumps({
+                "ts": ts.isoformat(), "uri": "/v1/chat/completions",
+                "status": 200, "peer": peer, "req_body_truncated": False,
+                "req_body": json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}]}),
+                "resp_meta": {"model": model, "usage": {"prompt_tokens": 100}},
+            }) + "\n")
+
+    headers = _key_header(_mk_user(UserRole.SERVICE))
+    source = {"source_type": "bodylog_files", "source_url": f"file://{tmp_path}"}
+    probe = client.post("/replay-datasets/probe", headers=headers,
+                        json={**source, "models": ["glm-5"], "forwarded_to": ["198.51.100.20"], "hours": 1})
+    assert probe.status_code == 200, probe.text
+    assert probe.json()["matched"] == 3 and probe.json()["error"] is None
+
+    models = client.post("/replay-datasets/values", headers=headers,
+                         json={**source, "field": "model", "hours": 1}).json()
+    assert [v["value"] for v in models["values"]] == ["glm-5", "qwen3"]
+    nodes = client.post("/replay-datasets/values", headers=headers,
+                        json={**source, "field": "forwarded_to", "models": ["qwen3"], "hours": 1}).json()
+    assert [v["value"] for v in nodes["values"]] == ["198.51.100.21:30000"]
+
+    user = _mk_user(UserRole.USER)
+    assert client.post("/replay-datasets/values", headers=_jwt_header(user),
+                       json={**source, "field": "model"}).status_code == 403
 
 
 # --- preflight: a service key is accepted, a person's key is not ------------------------
