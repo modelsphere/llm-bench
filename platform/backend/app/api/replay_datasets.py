@@ -6,9 +6,11 @@ from the pointer file on the datasets volume rather than from the build table �
 that pointer is what a benchmark will actually replay, so a disagreement between
 it and the history is a real signal worth surfacing, not something to paper over.
 
-Everything here is admin-only. Triggering a build is proxied to the collector
-service; the backend never runs a collection itself (a multi-minute streaming
-download has no business inside a request handler or the benchmark worker pool).
+Admins manage every profile. A service account (another platform, such as LLM
+AutoTune) reads them all, creates its own and manages only those, like the
+benchmarks it creates. Triggering a build is proxied to the collector service;
+the backend never runs a collection itself (a multi-minute streaming download
+has no business inside a request handler or the benchmark worker pool).
 """
 from __future__ import annotations
 
@@ -24,7 +26,12 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import require_admin, require_service_or_admin, resolve_user_from_token
+from app.api.auth import (
+    ensure_can_manage,
+    require_admin,
+    require_service_or_admin,
+    resolve_user_from_token,
+)
 from app.db.models import (
     Benchmark,
     BenchmarkModule,
@@ -40,6 +47,7 @@ from app.schemas.replay_datasets import (
     BuildListResponse,
     BuildResponse,
     CurrentBuild,
+    DraftProbeRequest,
     FeedHealthEntry,
     FeedHealthResponse,
     FreezeBuildRequest,
@@ -50,9 +58,13 @@ from app.schemas.replay_datasets import (
     ProfileCreate,
     ProfileListResponse,
     ProfileResponse,
+    ProfileSource,
     ProfileUpdate,
     source_errors,
     TriggerResponse,
+    ValueCount,
+    ValuesRequest,
+    ValuesResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,7 +72,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/replay-datasets", tags=["replay-datasets"])
 
 _PROFILE_FIELDS = (
-    "display_name", "description", "enabled", "source_url", "models", "statuses",
+    "display_name", "description", "enabled", "source_type", "source_url", "models", "statuses",
     "forwarded_to", "uris", "exclude_truncated", "extra_logsql", "window_hours",
     "window_timezone", "subwindow_minutes", "sample_size", "oversample_factor",
     "max_carry_multiple", "max_bytes", "clean", "max_model_len", "keep_response_body",
@@ -273,6 +285,7 @@ async def _to_response(session: AsyncSession, profile: ReplayDatasetProfile) -> 
     return ProfileResponse(
         id=profile.id,
         name=profile.name,
+        created_by_user_id=profile.created_by_user_id,
         created_at=profile.created_at,
         updated_at=profile.updated_at,
         current=current,
@@ -347,7 +360,7 @@ async def get_build(
 @router.post("/profiles", response_model=ProfileResponse, status_code=status.HTTP_201_CREATED)
 async def create_profile(
     body: ProfileCreate,
-    _admin: User = Depends(require_admin),
+    user: User = Depends(require_service_or_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
     existing = await session.execute(
@@ -355,7 +368,9 @@ async def create_profile(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Profile {body.name!r} already exists")
-    profile = ReplayDatasetProfile(name=body.name, **body.model_dump(exclude={"name"}))
+    profile = ReplayDatasetProfile(
+        name=body.name, created_by_user_id=user.id, **body.model_dump(exclude={"name"})
+    )
     session.add(profile)
     await session.commit()
     await session.refresh(profile)
@@ -366,10 +381,11 @@ async def create_profile(
 async def update_profile(
     profile_id: int,
     body: ProfileUpdate,
-    _admin: User = Depends(require_admin),
+    user: User = Depends(require_service_or_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
     profile = await _get_profile(session, profile_id)
+    ensure_can_manage(user, profile, "collection profiles")
     changes = body.model_dump(exclude_unset=True)
     errors = source_errors(
         changes.get("source_type", profile.source_type),
@@ -388,7 +404,7 @@ async def update_profile(
 @router.delete("/profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_profile(
     profile_id: int,
-    _admin: User = Depends(require_admin),
+    user: User = Depends(require_service_or_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Delete a profile and its build history.
@@ -400,6 +416,7 @@ async def delete_profile(
     by hand once nothing references it.
     """
     profile = await _get_profile(session, profile_id)
+    ensure_can_manage(user, profile, "collection profiles")
     await session.delete(profile)
     await session.commit()
 
@@ -477,7 +494,7 @@ async def trigger_build(
 async def probe_profile(
     profile_id: int,
     body: ProbeRequest,
-    _admin: User = Depends(require_admin),
+    user: User = Depends(require_service_or_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Count what this profile's filters match over the last few hours.
@@ -486,29 +503,91 @@ async def probe_profile(
     in the editor — as `matched: 0` — instead of hours later as an empty build.
     """
     profile = await _get_profile(session, profile_id)
+    ensure_can_manage(user, profile, "collection profiles")
+    from app.datasets.service import profile_to_build_profile
 
-    def _run() -> ProbeResponse:
-        from app.datasets.service import client_for, profile_to_build_profile
+    return await asyncio.to_thread(
+        _probe, profile.source_type, profile.source_url,
+        profile_to_build_profile(profile).filters, body.hours,
+    )
+
+
+@router.post("/probe", response_model=ProbeResponse)
+async def probe_draft(
+    body: DraftProbeRequest,
+    _user: User = Depends(require_service_or_admin),
+):
+    """The same count for a profile that is not saved yet: an editor shows
+    what its filters match before anything is created."""
+    return await asyncio.to_thread(
+        _probe, body.source_type, body.source_url, _filters_of(body), body.hours,
+    )
+
+
+@router.post("/values", response_model=ValuesResponse)
+async def field_values(
+    body: ValuesRequest,
+    _user: User = Depends(require_service_or_admin),
+):
+    """The most common models or backends among the matching records, with
+    counts — what an editor offers instead of asking for a name. A file source
+    reads every line in the window, so it is held to the last 24 hours."""
+    hours = body.hours if body.source_type == "victorialogs" else min(body.hours, 24.0)
+
+    def _run() -> ValuesResponse:
         from app.datasets.errors import LogSourceError
+        from app.datasets.sources import source_for
 
+        filters = _filters_of(body)
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=hours)
         try:
-            client = client_for(profile)
+            source = source_for(body.source_type, body.source_url)
         except LogSourceError as exc:
-            return ProbeResponse(matched=0, query="", error=str(exc)[:500])
+            return ValuesResponse(error=str(exc)[:500])
         try:
-            end = datetime.now(timezone.utc)
-            start = end - timedelta(hours=body.hours)
-            data = client.probe(profile_to_build_profile(profile).filters, start, end)
-            return ProbeResponse(**data)
+            values = source.top_values(filters, start, end, body.field, body.limit)
+            return ValuesResponse(
+                values=[ValueCount(value=v, count=n) for v, n in values],
+                query=source.describe(filters, start, end),
+            )
         except LogSourceError as exc:
-            return ProbeResponse(matched=0, query="", error=str(exc)[:500])
+            return ValuesResponse(error=str(exc)[:500])
         except Exception as exc:  # noqa: BLE001 - surfaced to the editor, not raised
-            logger.warning("[replay-datasets] probe failed", exc_info=True)
-            return ProbeResponse(matched=0, query="", error=f"{type(exc).__name__}: {exc}"[:500])
+            logger.warning("[replay-datasets] values query failed", exc_info=True)
+            return ValuesResponse(error=f"{type(exc).__name__}: {exc}"[:500])
         finally:
-            client.close()
+            source.close()
 
     return await asyncio.to_thread(_run)
+
+
+def _filters_of(body: ProfileSource):
+    from app.datasets.builder import profile_from_dict
+
+    return profile_from_dict({**body.model_dump(), "name": "draft"}).filters
+
+
+def _probe(source_type: str, source_url: str, filters, hours: float) -> ProbeResponse:
+    """One probe of a source, any failure returned as `error` for the editor."""
+    from app.datasets.errors import LogSourceError
+    from app.datasets.sources import source_for
+
+    try:
+        source = source_for(source_type, source_url)
+    except LogSourceError as exc:
+        return ProbeResponse(matched=0, query="", error=str(exc)[:500])
+    try:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=hours)
+        return ProbeResponse(**source.probe(filters, start, end))
+    except LogSourceError as exc:
+        return ProbeResponse(matched=0, query="", error=str(exc)[:500])
+    except Exception as exc:  # noqa: BLE001 - surfaced to the editor, not raised
+        logger.warning("[replay-datasets] probe failed", exc_info=True)
+        return ProbeResponse(matched=0, query="", error=f"{type(exc).__name__}: {exc}"[:500])
+    finally:
+        source.close()
 
 
 @router.get("/health", response_model=FeedHealthResponse)

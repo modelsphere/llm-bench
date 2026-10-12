@@ -42,6 +42,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterator
+from urllib.parse import urlparse
 
 import requests
 
@@ -75,6 +76,45 @@ def escape_value(value: str) -> str:
     """
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def backend_address(value: object) -> tuple[str, str]:
+    """A backend as (host, port), however it was written.
+
+    `http://198.51.100.20:8052/`, `198.51.100.20:8052` and the same with
+    `https://` all name one backend. A value without a port names every port on
+    that host — what someone means by "this node's traffic". The port is "" then.
+    """
+    s = str(value or "").strip().rstrip("/")
+    if "://" in s:
+        s = urlparse(s).netloc or s
+    host, sep, port = s.rpartition(":")
+    if not sep or not port.isdigit():
+        return s, ""
+    return host, port
+
+
+def _backend_clause(values: list[str]) -> str:
+    """`forwarded_to` as LogsQL: the backend in any of the forms a record may
+    carry it (with or without a scheme), in `forwarded_to` or, when no upstream
+    router reported the real backend, in `peer`. A host without a port matches
+    every port on it, through exact-prefix filters on `host:`."""
+    exact: list[str] = []
+    prefixes: list[str] = []
+    for value in values:
+        host, port = backend_address(value)
+        if not host:
+            continue
+        where = f"{host}:{port}" if port else host
+        exact += [f"http://{where}", f"https://{where}", where]
+        if not port:
+            prefixes += [f"http://{host}:", f"https://{host}:", f"{host}:"]
+    alternatives: list[str] = []
+    for fieldname in ("forwarded_to", "peer"):
+        if exact:
+            alternatives.append(f"{fieldname}:in({', '.join(escape_value(v) for v in exact)})")
+        alternatives += [f"{fieldname}:={escape_value(v)}*" for v in prefixes]
+    return f"({' OR '.join(alternatives)})" if alternatives else ""
 
 
 def _fmt_time(when: datetime) -> str:
@@ -114,7 +154,11 @@ class LogFilters:
             values = [v for v in values if str(v).strip()]
             if not values:
                 continue
-            if len(values) == 1:
+            if fieldname == "forwarded_to":
+                clause = _backend_clause(values)
+                if clause:
+                    out.append(clause)
+            elif len(values) == 1:
                 out.append(f"{fieldname}:={escape_value(values[0])}")
             else:
                 joined = " OR ".join(f"{fieldname}:={escape_value(v)}" for v in values)
@@ -266,8 +310,10 @@ class VictoriaLogsClient:
         if matched:
             for row in self.iter_rows(build_query(filters, start, end, limit=1)):
                 sample_fields = sorted(row.keys())
+                # Rows are flattened: the usage block arrives as dotted keys.
+                tokens = row.get("resp_meta.usage.prompt_tokens") or row.get("prompt_tokens")
                 try:
-                    sample_prompt_tokens = int(row.get("prompt_tokens") or 0) or None
+                    sample_prompt_tokens = int(tokens or 0) or None
                 except (TypeError, ValueError):
                     sample_prompt_tokens = None
                 break
@@ -277,3 +323,36 @@ class VictoriaLogsClient:
             "sample_fields": sample_fields,
             "sample_prompt_tokens": sample_prompt_tokens,
         }
+
+    def top_values(
+        self, filters: LogFilters, start: datetime, end: datetime, fieldname: str, limit: int = 50,
+    ) -> list[tuple[str, int]]:
+        """The most common values of one field among the matching rows, with
+        their counts, most common first: which models and backends the store
+        has seen, so an editor can offer them instead of asking for a name."""
+        if fieldname != "forwarded_to":
+            return self._counts(filters, start, end, fieldname, limit)
+        # Backends come back as `host:port`, however each record spelled them,
+        # and from `peer` when no router reported the real backend.
+        merged: dict[str, int] = {}
+        for source_field in ("forwarded_to", "peer"):
+            for value, n in self._counts(filters, start, end, source_field, limit):
+                host, port = backend_address(value)
+                key = f"{host}:{port}" if port else host
+                merged[key] = merged.get(key, 0) + n
+            if merged:
+                break
+        return sorted(merged.items(), key=lambda item: (-item[1], item[0]))[:limit]
+
+    def _counts(self, filters, start, end, fieldname, limit) -> list[tuple[str, int]]:
+        pipe = f"stats by ({fieldname}) count() as n | sort by (n desc) | limit {int(limit)}"
+        out: list[tuple[str, int]] = []
+        for row in self.iter_rows(build_query(filters, start, end, pipe=pipe)):
+            value = str(row.get(fieldname) or "").strip()
+            if not value:
+                continue
+            try:
+                out.append((value, int(row.get("n") or 0)))
+            except (TypeError, ValueError):
+                continue
+        return out
