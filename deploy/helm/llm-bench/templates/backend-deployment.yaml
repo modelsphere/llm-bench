@@ -16,10 +16,15 @@ spec:
       labels:
         {{- include "llm-bench.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: backend
-      {{- with .Values.podAnnotations }}
       annotations:
+        # The settings arrive through envFrom: a changed value must restart
+        # the pods that read it, or they keep the old one until something
+        # else restarts them.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -80,6 +85,13 @@ spec:
             periodSeconds: 10
             # Tolerate a few missed checks before declaring the process dead.
             failureThreshold: 3
+          # The Service keeps sending requests to a terminating pod for a few
+          # seconds; serve them, so a rolling upgrade drops none (AutoTune
+          # polls it through every benchmark).
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "8"]
           readinessProbe:
             httpGet:
               path: /health

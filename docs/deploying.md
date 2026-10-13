@@ -151,8 +151,14 @@ Two consequences:
 
 - While a long run drains, its old pod stays `Terminating`, so two worker
   generations coexist. Size for it.
-- The migrate Job runs after the new pods start. A migration that removes or
-  renames something the old code still reads breaks the draining workers.
+- The schema is migrated before any pod is replaced (a `pre-upgrade` Job,
+  `-schema`), so the new backend never answers from the old schema. The old
+  pods, including draining workers, run against the new schema meanwhile: a
+  migration that removes or renames something the old code still reads breaks
+  them. Seeding still runs in the migrate Job after the upgrade.
+- The backend and frontend keep serving for 8 seconds after they are told to
+  stop, so a rolling upgrade drops no request. A changed setting (the ConfigMap
+  or the Secret) restarts the pods that read it.
 
 ### Disruptive upgrades
 
@@ -175,9 +181,12 @@ kubectl -n llm-bench exec deploy/llm-bench-redis -- redis-cli DEL platform:cordo
 | Anything that changes how scores are computed | Cordon — mixing old and new scoring fails silently |
 | A dramatiq major version, a renamed actor, a changed Redis key prefix | Cordon |
 
-**If `helm upgrade --wait` times out**, look at pod readiness before the
-migrate Job: the Job is a post-upgrade hook and only runs once the release is
-up, so a timeout usually means a component failed to start, not a migration.
+**If `helm upgrade` fails before anything changed**, read the `-schema` Job's
+log: the migration preflight refuses while a long transaction would block the
+migration, and says which. **If `helm upgrade --wait` times out** after that,
+look at pod readiness: the migrate Job (seeding) is a post-upgrade hook and
+only runs once the release is up, so a timeout usually means a component failed
+to start, not a migration.
 
 ## Data safety
 

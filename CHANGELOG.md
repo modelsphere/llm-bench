@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `helm upgrade` migrates the schema before any pod is replaced (a
+  `pre-upgrade` Job runs the preflight and `alembic upgrade head`; the migrate
+  Job still seeds afterwards). The new backend answered 500 from the old schema
+  until the post-upgrade Job caught up.
+- A changed setting restarts the backend, worker and dataset collector: their
+  pods now carry checksums of the ConfigMap and the Secret. Before, an upgrade
+  that only changed a value (turning datasets on, a new key) left them on the
+  old one.
+- The backend and frontend keep serving for 8 seconds after they are told to
+  stop (`preStop`), so a rolling upgrade drops no request.
 - Listing profiles failed once a VictoriaLogs profile existed: responses
   left out `source_type`, so the URL failed the file source's validation.
 - A VictoriaLogs probe reports the sample's prompt tokens, read from the
