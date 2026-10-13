@@ -341,6 +341,9 @@ class FrozenDatasetResponse(BaseModel):
     window_start: datetime | None = None
     window_end: datetime | None = None
     frozen_by: str = ""
+    # "upload": imported from a file (another installation's build, typically);
+    # "": frozen out of this installation's own feed.
+    origin: str = ""
     # Benchmarks whose dataset_path currently points at this frozen file — the
     # UI warns before deleting one, and delete refuses unless forced.
     used_by: list[str] = Field(default_factory=list)

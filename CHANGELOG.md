@@ -15,9 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `POST /replay-datasets/probe` counts what an unsaved source and filters
   match, and `POST /replay-datasets/values` lists the models or backends a
   store has seen, with request counts, so an editor can offer them.
+- **Import a dataset file** as a frozen dataset (`PUT /replay-datasets/frozen/{name}`,
+  the file as the request body), and **download** a frozen dataset
+  (`GET /replay-datasets/frozen/{name}/download`). Together they move a dataset
+  between installations: a build downloaded from one replays the same requests
+  in another. An import is checked record by record before it appears, keeps
+  the hash it had where it was built, and is always frozen. **Import…** and
+  **Download** in the admin UI's frozen datasets; at most `REPLAY_IMPORT_MAX_GB`
+  (20). The frontend's nginx streams these without a size limit or buffering.
+- Frozen datasets record where they came from (`origin`: `upload` for an
+  import).
 
 ### Changed
 
+- Service accounts may list frozen datasets, so LLM AutoTune can offer them as
+  replay datasets.
 - A `forwarded_to` filter without a port matches every port on that host.
   On VictoriaLogs it now also matches the backend with or without a scheme,
   and in `peer`, as the file source already did.

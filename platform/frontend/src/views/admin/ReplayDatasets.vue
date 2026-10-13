@@ -233,9 +233,14 @@
           <h2 class="text-lg font-semibold text-gray-900">{{ $t('replayDs.frozenTitle') }}</h2>
           <p class="text-sm text-gray-500">{{ $t('replayDs.frozenSubtitle') }}</p>
         </div>
-        <button class="text-sm text-gray-500 hover:text-gray-700" :disabled="frozenLoading" @click="loadFrozen">
-          {{ $t('adminSubs.refresh') }}
-        </button>
+        <div class="flex items-center gap-4">
+          <button class="text-sm font-medium text-indigo-600 hover:text-indigo-800" @click="openImport">
+            {{ $t('replayDs.importButton') }}
+          </button>
+          <button class="text-sm text-gray-500 hover:text-gray-700" :disabled="frozenLoading" @click="loadFrozen">
+            {{ $t('adminSubs.refresh') }}
+          </button>
+        </div>
       </div>
 
       <div
@@ -260,7 +265,12 @@
           <tbody class="divide-y divide-gray-100">
             <tr v-for="f in frozen" :key="f.name">
               <td class="py-2 px-4">
-                <div class="font-medium text-gray-800">{{ f.name }}</div>
+                <div class="font-medium text-gray-800">
+                  {{ f.name }}
+                  <span v-if="f.origin === 'upload'"
+                    class="ml-1 px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-normal">
+                    {{ $t('replayDs.originUpload') }}</span>
+                </div>
                 <div v-if="f.used_by.length" class="text-amber-700 mt-0.5">
                   {{ $t('replayDs.frozenUsedBy', { benchmarks: f.used_by.join(', ') }) }}
                 </div>
@@ -280,7 +290,11 @@
                   {{ copiedPath === f.path ? $t('replayDs.copied') : $t('replayDs.copyPath') }}
                 </button>
               </td>
-              <td class="py-2 px-4 text-right">
+              <td class="py-2 px-4 text-right whitespace-nowrap">
+                <a class="font-medium text-indigo-600 hover:text-indigo-800 mr-4"
+                  :href="replayDatasetsApi.frozenDownloadUrl(f.name)" download>
+                  {{ $t('replayDs.download') }}
+                </a>
                 <button class="font-medium text-red-600 hover:text-red-800" @click="removeFrozen(f)">
                   {{ $t('common.delete') }}
                 </button>
@@ -288,6 +302,57 @@
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Import a dataset file as a frozen dataset -->
+    <div v-if="importing" class="fixed inset-0 bg-black/40 flex items-start justify-center overflow-y-auto p-4 z-50">
+      <div class="bg-white rounded-lg shadow-xl w-full max-w-lg my-16">
+        <div class="px-6 py-4 border-b border-gray-200">
+          <h2 class="font-semibold text-gray-900">{{ $t('replayDs.importTitle') }}</h2>
+          <p class="text-sm text-gray-500 mt-1">{{ $t('replayDs.importHelp') }}</p>
+        </div>
+        <div class="px-6 py-4 space-y-4 text-sm">
+          <label class="block">
+            <span class="text-gray-700">{{ $t('replayDs.importFile') }}</span>
+            <input type="file" accept=".jsonl,.gz,.jsonl.gz" class="mt-1 block w-full text-sm"
+              :disabled="importBusy" @change="pickImportFile" />
+          </label>
+          <label class="block">
+            <span class="text-gray-700">{{ $t('replayDs.fName') }}</span>
+            <input v-model="importing.name" class="mt-1 w-full border border-gray-300 rounded px-2 py-1 font-mono"
+              :disabled="importBusy" placeholder="lowercase-slug" />
+          </label>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block">
+              <span class="text-gray-700">{{ $t('replayDs.importSourceProfile') }}</span>
+              <input v-model="importing.source_profile"
+                class="mt-1 w-full border border-gray-300 rounded px-2 py-1 font-mono" :disabled="importBusy" />
+            </label>
+            <label class="block">
+              <span class="text-gray-700">{{ $t('replayDs.importSourceBuild') }}</span>
+              <input v-model="importing.source_build_id"
+                class="mt-1 w-full border border-gray-300 rounded px-2 py-1 font-mono" :disabled="importBusy" />
+            </label>
+          </div>
+          <div v-if="importBusy" class="w-full bg-gray-100 rounded h-2 overflow-hidden">
+            <div class="bg-indigo-500 h-2" :style="{ width: `${Math.round(importProgress * 100)}%` }"></div>
+          </div>
+          <p v-if="importBusy" class="text-gray-500">
+            {{ importProgress < 1 ? $t('replayDs.importUploading', { pct: Math.round(importProgress * 100) })
+              : $t('replayDs.importChecking') }}
+          </p>
+          <p v-if="importError" class="text-red-600">{{ importError }}</p>
+        </div>
+        <div class="px-6 py-3 border-t border-gray-200 flex justify-end gap-2">
+          <button class="px-3 py-1.5 text-sm text-gray-600" :disabled="importBusy" @click="importing = null">
+            {{ $t('common.cancel') }}
+          </button>
+          <button class="px-3 py-1.5 text-sm rounded bg-indigo-600 text-white disabled:opacity-50"
+            :disabled="importBusy || !importing.file || !importing.name" @click="submitImport">
+            {{ $t('replayDs.importSubmit') }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -575,6 +640,58 @@ const copiedPath = ref('')
 
 const frozen = ref<FrozenDataset[]>([])
 const frozenLoading = ref(false)
+
+// -- importing a dataset file --------------------------------------------------
+interface ImportForm { file: File | null; name: string; source_profile: string; source_build_id: string }
+const importing = ref<ImportForm | null>(null)
+const importBusy = ref(false)
+const importProgress = ref(0)
+const importError = ref('')
+
+function openImport() {
+  importing.value = { file: null, name: '', source_profile: '', source_build_id: '' }
+  importError.value = ''
+  importProgress.value = 0
+}
+
+/** A downloaded build is named `<profile>-<build id>.jsonl[.gz]`: fill the name
+ *  and the provenance in from it, editable. */
+function pickImportFile(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0] ?? null
+  if (!importing.value) return
+  importing.value.file = file
+  if (!file) return
+  const stem = file.name.replace(/\.jsonl(\.gz)?$/i, '').replace(/\.gz$/i, '')
+  const build = /^(.+)-(\d{8}T\d{6}Z)$/.exec(stem)
+  if (build) {
+    importing.value.source_profile = build[1]
+    importing.value.source_build_id = build[2]
+  }
+  if (!importing.value.name) {
+    importing.value.name = stem.toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^[^a-z0-9]+/, '').slice(0, 64)
+  }
+}
+
+async function submitImport() {
+  const form = importing.value
+  if (!form?.file || !form.name) return
+  importBusy.value = true
+  importError.value = ''
+  importProgress.value = 0
+  try {
+    await replayDatasetsApi.importFrozen(form.name, form.file, {
+      source_profile: form.source_profile || undefined,
+      source_build_id: form.source_build_id || undefined,
+    }, (f) => { importProgress.value = f })
+    importing.value = null
+    await loadFrozen()
+  } catch (e: any) {
+    importError.value = e?.response?.data?.detail || e?.message || t('replayDs.importFailed')
+  } finally {
+    importBusy.value = false
+  }
+}
 
 const expandedId = ref<number | null>(null)
 const builds = ref<ReplayDatasetBuild[]>([])

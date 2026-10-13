@@ -519,7 +519,18 @@
     "sourceBodylogFiles": "网关 bodylog 文件",
     "sourceVictoriaLogs": "VictoriaLogs",
     "fSourceUrlHintFiles": "网关 bodylog listener 写入的目录，挂载进采集器（file:///data/bodylog）。",
-    "fSourceUrlHintVl": "网关 bodylog 所写入的 VictoriaLogs 地址。"
+    "fSourceUrlHintVl": "网关 bodylog 所写入的 VictoriaLogs 地址。",
+    "importButton": "导入…",
+    "importTitle": "导入数据集",
+    "importHelp": ".jsonl 或 .jsonl.gz 格式的回放数据集，例如从另一套安装下载的构建或冻结数据集。导入的数据集总是冻结的。",
+    "importFile": "文件",
+    "importSourceProfile": "来源 profile（可选）",
+    "importSourceBuild": "来源构建（可选）",
+    "importUploading": "上传中… {pct}%",
+    "importChecking": "正在检查每条记录…",
+    "importSubmit": "导入",
+    "importFailed": "导入失败",
+    "originUpload": "已导入"
   },
   "users": {
     "subtitle": "只有超级管理员可以任命或撤销管理员。超级管理员角色需在后端直接授予，此处不可操作。",

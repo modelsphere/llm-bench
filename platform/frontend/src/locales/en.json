@@ -519,7 +519,18 @@
     "sourceBodylogFiles": "Gateway bodylog files",
     "sourceVictoriaLogs": "VictoriaLogs",
     "fSourceUrlHintFiles": "The directory the gateway's bodylog listener writes, mounted into the collector (file:///data/bodylog).",
-    "fSourceUrlHintVl": "The VictoriaLogs base URL the gateway's bodylogs are shipped to."
+    "fSourceUrlHintVl": "The VictoriaLogs base URL the gateway's bodylogs are shipped to.",
+    "importButton": "Import…",
+    "importTitle": "Import a dataset",
+    "importHelp": "A .jsonl or .jsonl.gz replay dataset, such as a build or frozen dataset downloaded from another installation. An import is always frozen.",
+    "importFile": "File",
+    "importSourceProfile": "Source profile (optional)",
+    "importSourceBuild": "Source build (optional)",
+    "importUploading": "Uploading… {pct}%",
+    "importChecking": "Checking every record…",
+    "importSubmit": "Import",
+    "importFailed": "Import failed",
+    "originUpload": "imported"
   },
   "users": {
     "subtitle": "Only super admins can promote or revoke admins. The super admin role is granted directly in the backend, not here.",

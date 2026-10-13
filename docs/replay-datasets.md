@@ -434,6 +434,43 @@ curl -sS -L -OJ \
 
 ---
 
+## 10. Move a dataset to another installation: download, then import
+
+A replay dataset can be benchmarked anywhere once it is there: download a build
+(section 9) or a frozen dataset from one installation, and import the file into
+another as a frozen dataset. Benchmarks there then replay exactly the same
+requests. An import is always frozen: nothing collects into it.
+
+```bash
+# On the source installation: a frozen dataset's file.
+curl -sS -L -OJ "$API/replay-datasets/frozen/acceptance-2026-q3/download" -H "$AUTH"
+
+# On the destination: the file is the request body (.jsonl or .jsonl.gz, told
+# apart by its first bytes); the name becomes the frozen dataset's name.
+curl -sS -X PUT -T glm5-ondemand-20260823T093502Z.jsonl.gz \
+  "$DEST_API/replay-datasets/frozen/glm5-q3?source_profile=glm5-ondemand&source_build_id=20260823T093502Z" \
+  -H "$DEST_AUTH" -H "Content-Type: application/octet-stream"
+# → {"name":"glm5-q3","path":"/app/dataset/replay/frozen/glm5-q3.jsonl.gz",
+#    "records":2000,"sha256":"…","origin":"upload", …}
+```
+
+- The upload streams into the datasets volume and appears only once every
+  record has been checked to be one the replay runner can read. A file that is
+  not a replay dataset answers **422** with the first line that is not; a taken
+  name answers **409**; one larger than `REPLAY_IMPORT_MAX_GB` (20 by default)
+  answers **413**.
+- `sha256` is of the uncompressed content, as a build's is, so an imported build
+  keeps the hash it had where it was built. `source_profile` and
+  `source_build_id` are optional provenance, shown with the dataset.
+- The backend writes the file itself, so an import works without the collector.
+- In the admin UI, **Import…** above the frozen datasets does the same, filling
+  the name and provenance in from a downloaded build's file name; each frozen
+  dataset has a **Download** link.
+- Point a `fixed`-source benchmark at the imported dataset's `path`, as for any
+  frozen dataset.
+
+---
+
 ## The whole thing, as a script
 
 ```bash
@@ -481,8 +518,10 @@ curl -sf "$API/replay-datasets/profiles/$ID" -H "$AUTH" \
 | POST | `/replay-datasets/profiles/{id}/builds/{build_row_id}/freeze` | freeze a ready build into a permanent `frozen/<name>` dataset → its path |
 | GET | `/replay-datasets/frozen` | list frozen datasets, each with the benchmarks (`used_by`) that replay it |
 | DELETE | `/replay-datasets/frozen/{name}` | delete a frozen dataset (`?force=true` to override the in-use guard) |
+| GET | `/replay-datasets/frozen/{name}/download` | download a frozen dataset's file (`?token=` accepted) |
+| PUT | `/replay-datasets/frozen/{name}` | import the request body (a `.jsonl` or `.jsonl.gz` file) as a frozen dataset (`?source_profile=&source_build_id=` optional; `?token=` accepted) |
 
-Profiles, builds, probes and values are open to admins and service accounts;
-*owner* means an admin, or the service account that created the profile.
-Downloading a build, freezing one, and listing or deleting frozen datasets are
+Profiles, builds, probes and values, and the list of frozen datasets, are open
+to admins and service accounts; *owner* means an admin, or the service account
+that created the profile. Downloading, freezing, importing and deleting are
 admin-only.
