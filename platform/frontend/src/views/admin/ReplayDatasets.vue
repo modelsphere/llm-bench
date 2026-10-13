@@ -244,7 +244,7 @@
       </div>
 
       <div
-        v-if="frozen.length === 0"
+        v-if="frozen.length === 0 && inFlight.length === 0"
         class="text-sm text-gray-400 py-8 text-center border border-dashed border-gray-200 rounded-lg"
       >
         {{ $t('replayDs.frozenEmpty') }}
@@ -263,6 +263,20 @@
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-100">
+            <tr v-for="f in inFlight" :key="`importing-${f.name}`" class="text-gray-500">
+              <td class="py-2 px-4">
+                <div class="font-medium text-gray-800">{{ f.name }}</div>
+                <div class="mt-0.5">
+                  {{ f.state === 'checking'
+                    ? $t('replayDs.importInFlightChecking', { count: f.checked.toLocaleString() })
+                    : $t('replayDs.importInFlightUploading', { size: formatBytes(f.received) }) }}
+                </div>
+              </td>
+              <td class="py-2 px-4" colspan="6">
+                {{ f.started_at ? new Date(f.started_at).toLocaleString() : '' }}
+                <span v-if="f.by"> · {{ f.by }}</span>
+              </td>
+            </tr>
             <tr v-for="f in frozen" :key="f.name">
               <td class="py-2 px-4">
                 <div class="font-medium text-gray-800">
@@ -345,8 +359,9 @@
           <p v-if="importError" class="text-red-600">{{ importError }}</p>
         </div>
         <div class="px-6 py-3 border-t border-gray-200 flex justify-end gap-2">
-          <button class="px-3 py-1.5 text-sm text-gray-600" :disabled="importBusy" @click="importing = null">
-            {{ $t('common.cancel') }}
+          <button class="px-3 py-1.5 text-sm text-gray-600" @click="closeImport">
+            {{ !importBusy ? $t('common.cancel')
+              : importProgress < 1 ? $t('replayDs.importStop') : $t('replayDs.importClose') }}
           </button>
           <button class="px-3 py-1.5 text-sm rounded bg-indigo-600 text-white disabled:opacity-50"
             :disabled="importBusy || !importing.file || !importing.name" @click="submitImport">
@@ -619,11 +634,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   replayDatasetsApi,
   type FrozenDataset,
+  type FrozenImport,
   type ReplayDatasetBuild,
   type ReplayDatasetProfile,
 } from '@/api/client'
@@ -639,7 +655,9 @@ const busyId = ref<number | null>(null)
 const copiedPath = ref('')
 
 const frozen = ref<FrozenDataset[]>([])
+const inFlight = ref<FrozenImport[]>([])
 const frozenLoading = ref(false)
+let frozenPoll: ReturnType<typeof setTimeout> | undefined
 
 // -- importing a dataset file --------------------------------------------------
 interface ImportForm { file: File | null; name: string; source_profile: string; source_build_id: string }
@@ -647,6 +665,7 @@ const importing = ref<ImportForm | null>(null)
 const importBusy = ref(false)
 const importProgress = ref(0)
 const importError = ref('')
+let importAbort: AbortController | null = null
 
 function openImport() {
   importing.value = { file: null, name: '', source_profile: '', source_build_id: '' }
@@ -679,18 +698,35 @@ async function submitImport() {
   importBusy.value = true
   importError.value = ''
   importProgress.value = 0
+  const abort = importAbort = new AbortController()
   try {
     await replayDatasetsApi.importFrozen(form.name, form.file, {
       source_profile: form.source_profile || undefined,
       source_build_id: form.source_build_id || undefined,
-    }, (f) => { importProgress.value = f })
-    importing.value = null
-    await loadFrozen()
+    }, (f) => { importProgress.value = f }, abort.signal)
+    if (importing.value === form) importing.value = null
   } catch (e: any) {
-    importError.value = e?.response?.data?.detail || e?.message || t('replayDs.importFailed')
+    if (importing.value === form && !abort.signal.aborted) {
+      importError.value = e?.response?.data?.detail || e?.message || t('replayDs.importFailed')
+    }
   } finally {
-    importBusy.value = false
+    if (importAbort === abort) {
+      importAbort = null
+      importBusy.value = false
+    }
+    await loadFrozen()
   }
+}
+
+/** Cancel before an import starts; stop it while the file uploads (the server
+ *  then throws the partial file away); or just close the dialog once the file
+ *  is up: the server finishes the check, and the list shows it meanwhile. */
+function closeImport() {
+  if (importBusy.value && importProgress.value < 1) importAbort?.abort()
+  importAbort = null
+  importBusy.value = false
+  importing.value = null
+  loadFrozen()
 }
 
 const expandedId = ref<number | null>(null)
@@ -860,11 +896,15 @@ async function loadFrozen() {
   try {
     const { data } = await replayDatasetsApi.listFrozen()
     frozen.value = data.frozen
+    inFlight.value = data.importing ?? []
   } catch (e: any) {
     error.value = e.response?.data?.detail || t('replayDs.loadFailed')
   } finally {
     frozenLoading.value = false
   }
+  // Follow imports in progress until their datasets appear.
+  clearTimeout(frozenPoll)
+  if (inFlight.value.length && !unmounted) frozenPoll = setTimeout(loadFrozen, 5000)
 }
 
 // A sensible default the admin can accept: profile + build id, slugified (the
@@ -997,5 +1037,7 @@ function shortRange(a?: string | null, b?: string | null) {
   return `${fmt(a)} → ${fmt(b)}`
 }
 
+let unmounted = false
 onMounted(() => { load(); loadFrozen() })
+onUnmounted(() => { unmounted = true; clearTimeout(frozenPoll) })
 </script>

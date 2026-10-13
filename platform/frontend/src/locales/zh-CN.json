@@ -527,7 +527,11 @@
     "importSourceProfile": "来源 profile（可选）",
     "importSourceBuild": "来源构建（可选）",
     "importUploading": "上传中… {pct}%",
-    "importChecking": "正在检查每条记录…",
+    "importChecking": "上传完成，正在检查每条记录… 可以关闭此窗口：检查完成后数据集会出现在列表中。",
+    "importClose": "关闭",
+    "importStop": "停止上传",
+    "importInFlightUploading": "上传中，已收到 {size}",
+    "importInFlightChecking": "检查记录中，已检查 {count} 条",
     "importSubmit": "导入",
     "importFailed": "导入失败",
     "originUpload": "已导入"

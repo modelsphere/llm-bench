@@ -17,12 +17,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
+from starlette.requests import ClientDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +54,7 @@ from app.schemas.replay_datasets import (
     FeedHealthResponse,
     FreezeBuildRequest,
     FrozenDatasetResponse,
+    FrozenImportResponse,
     FrozenListResponse,
     ProbeRequest,
     ProbeResponse,
@@ -770,12 +773,20 @@ async def list_frozen_datasets(
     session: AsyncSession = Depends(get_async_session),
 ):
     """Every frozen dataset, with the benchmarks (if any) that currently replay
-    it. Reads the volume directly, so it works even when no collector is up."""
+    it, and the imports still in progress. Reads the volume directly, so it
+    works even when no collector is up."""
+    from bench.replay_test import dataset_feed
+
     frozen = await asyncio.to_thread(_frozen_from_disk)
+    importing = await asyncio.to_thread(dataset_feed.list_imports, None)
     usage = await _frozen_usage(session)
     for dataset in frozen:
         dataset.used_by = usage.get(dataset.path, [])
-    return FrozenListResponse(frozen=frozen, collector_configured=bool(collector_base_url()))
+    return FrozenListResponse(
+        frozen=frozen,
+        importing=[FrozenImportResponse(**vars(entry)) for entry in importing],
+        collector_configured=bool(collector_base_url()),
+    )
 
 
 @router.delete("/frozen/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -825,6 +836,9 @@ async def delete_frozen_dataset(
 # the datasets volume. REPLAY_IMPORT_MAX_GB overrides.
 _IMPORT_MAX_BYTES = int(float(os.getenv("REPLAY_IMPORT_MAX_GB", "20")) * (1 << 30))
 _GZIP_MAGIC = b"\x1f\x8b"
+# How often an import records its progress, which also keeps it from being
+# taken for a dead one (dataset_feed.IMPORT_STALE_SECONDS).
+_IMPORT_NOTE_SECONDS = 5.0
 
 
 @router.get("/frozen/{name}/download")
@@ -880,12 +894,17 @@ async def import_frozen_dataset(
         raise HTTPException(status_code=422, detail=str(exc)) from None
     if await asyncio.to_thread(_resolve_frozen, name) is not None:
         raise HTTPException(status_code=409, detail=f"A frozen dataset named {name!r} exists")
+    # The name is held from here until the dataset is published or the import
+    # ends: the list shows the import, and a second import of it gets a 409.
+    try:
+        entry = await asyncio.to_thread(dataset_feed.begin_import, None, name, by=frozen_by)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
 
-    staging = dataset_feed.frozen_root(None) / dataset_feed.STAGING_DIRNAME
-    await asyncio.to_thread(staging.mkdir, parents=True, exist_ok=True)
-    staged = staging / f"import-{name}-{os.getpid()}-{id(request)}.part"
+    staged = dataset_feed.import_staged_path(None, name)
     received = 0
     head = b""
+    noted = time.monotonic()
     try:
         with open(staged, "wb") as out:
             async for chunk in request.stream():
@@ -901,22 +920,52 @@ async def import_frozen_dataset(
                                "(REPLAY_IMPORT_MAX_GB)",
                     )
                 await asyncio.to_thread(out.write, chunk)
+                if time.monotonic() - noted >= _IMPORT_NOTE_SECONDS:
+                    entry = await asyncio.to_thread(
+                        dataset_feed.note_import, None, entry, received=received)
+                    noted = time.monotonic()
         if not received:
             raise HTTPException(status_code=422, detail="the request body is empty")
+    except ClientDisconnect:
+        dataset_feed.abandon_import(None, name)
+        logger.info("[replay-datasets] import of %s stopped by the client after %d bytes",
+                    name, received)
+        raise HTTPException(status_code=400, detail="the upload was stopped") from None
+    except BaseException:
+        dataset_feed.abandon_import(None, name)
+        raise
+
+    # The whole file is here. Checking a multi-GB dataset takes minutes, so it
+    # runs to the end in its own thread whether or not the client still waits,
+    # and ends the import itself: the dataset appears in the list when done.
+    def check_and_publish():
+        progress = dataset_feed.note_import(None, entry, state="checking", received=received)
+        noted = time.monotonic()
+
+        def on_progress(checked: int) -> None:
+            nonlocal progress, noted
+            if time.monotonic() - noted >= _IMPORT_NOTE_SECONDS:
+                progress = dataset_feed.note_import(None, progress, checked=checked)
+                noted = time.monotonic()
+
         try:
-            dataset = await asyncio.to_thread(
-                dataset_feed.import_frozen, None, name, staged,
+            return dataset_feed.import_frozen(
+                None, name, staged,
                 compressed=head == _GZIP_MAGIC,
                 source_profile=source_profile.strip()[:64],
                 source_build_id=source_build_id.strip()[:64],
                 frozen_by=frozen_by,
+                on_progress=on_progress,
             )
-        except FileExistsError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"not a replay dataset: {exc}") from None
-    finally:
-        staged.unlink(missing_ok=True)
+        finally:
+            dataset_feed.abandon_import(None, name)
+
+    try:
+        dataset = await asyncio.to_thread(check_and_publish)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"not a replay dataset: {exc}") from None
     logger.info("[replay-datasets] %s imported frozen dataset %s (%d records)",
                 frozen_by, name, dataset.records)
     return FrozenDatasetResponse(

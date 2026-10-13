@@ -527,7 +527,11 @@
     "importSourceProfile": "Source profile (optional)",
     "importSourceBuild": "Source build (optional)",
     "importUploading": "Uploading… {pct}%",
-    "importChecking": "Checking every record…",
+    "importChecking": "Upload done. Checking every record… You can close this: the dataset appears in the list when the check is done.",
+    "importClose": "Close",
+    "importStop": "Stop upload",
+    "importInFlightUploading": "uploading, {size} so far",
+    "importInFlightChecking": "checking records, {count} so far",
     "importSubmit": "Import",
     "importFailed": "Import failed",
     "originUpload": "imported"

@@ -349,8 +349,22 @@ class FrozenDatasetResponse(BaseModel):
     used_by: list[str] = Field(default_factory=list)
 
 
+class FrozenImportResponse(BaseModel):
+    """An import still in progress: its file uploading, or every record of it
+    being checked. The dataset appears in `frozen` when it is done."""
+
+    name: str
+    state: str  # "uploading" or "checking"
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
+    received: int = 0  # bytes received
+    checked: int = 0   # records checked
+    by: str = ""
+
+
 class FrozenListResponse(BaseModel):
     frozen: list[FrozenDatasetResponse]
+    importing: list[FrozenImportResponse] = Field(default_factory=list)
     # False when no collector is reachable — freezing/deleting a build needs the
     # collector (it is the writer of the datasets volume); listing does not.
     collector_configured: bool = False

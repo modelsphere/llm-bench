@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An import that was stopped, or whose page was closed, could hold its name
+  with nothing in the list: the check of every record keeps running after the
+  upload, and a second import of the name then failed. Imports in progress are
+  now listed (`importing` in `GET /replay-datasets/frozen`: uploading, or
+  checking records, with progress), and a second import of the same name says
+  it is already being imported. Stopping an upload throws the partial file
+  away; an import whose backend died frees its name within two minutes; a
+  meta file left without its dataset no longer takes the name. The admin UI
+  shows imports in progress, and the import dialog can stop an upload or close
+  while the check finishes.
 - On an installation with a datasets volume but no collector, deleting a
   frozen dataset answered 503: the backend now deletes it itself, as it
   writes an import itself. The chart sets `REPLAY_FROZEN_ROOT` whenever
