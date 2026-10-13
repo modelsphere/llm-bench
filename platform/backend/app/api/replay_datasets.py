@@ -802,6 +802,14 @@ async def delete_frozen_dataset(
                     f"pass force=true."
                 ),
             )
+    if not collector_base_url():
+        # No collector to write the volume: the backend removes the files
+        # itself, as it writes an import itself, so an installation that only
+        # imports frozen datasets can also delete them.
+        from bench.replay_test import dataset_feed
+
+        await asyncio.to_thread(dataset_feed.delete_frozen, None, name)
+        return
     resp = await _collector_call("DELETE", f"/frozen/{name}")
     if resp.status_code in (400, 404):
         raise HTTPException(status_code=resp.status_code, detail=_collector_detail(resp))

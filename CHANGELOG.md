@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On an installation with a datasets volume but no collector, deleting a
+  frozen dataset answered 503: the backend now deletes it itself, as it
+  writes an import itself. The chart sets `REPLAY_FROZEN_ROOT` whenever
+  `datasets.enabled` is on, not only with the collector, so a custom
+  `datasets.mountPath` keeps imports on the volume.
 - `helm upgrade` migrates the schema before any pod is replaced (a
   `pre-upgrade` Job runs the preflight and `alembic upgrade head`; the migrate
   Job still seeds afterwards). The new backend answered 500 from the old schema

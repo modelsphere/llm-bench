@@ -33,8 +33,11 @@ data:
   # Backend and worker resolve rolling profiles by reading the pointer file
   # directly off the datasets volume, so they need the same root as the collector.
   REPLAY_FEED_ROOT: {{ .Values.datasetBuilder.feedRoot | default (printf "%s/replay/auto" .Values.datasets.mountPath) | quote }}
-  # Where frozen (permanent) datasets live. The collector writes them here, the
-  # backend lists them from here, and workers replay them by path — all from one
-  # env so nobody disagrees about the location. A sibling of the rolling feed.
+  {{- end }}
+  {{- if or .Values.datasetBuilder.enabled .Values.datasets.enabled }}
+  # Where frozen (permanent) datasets live. The collector (or, for an import,
+  # the backend) writes them here, the backend lists them from here, and
+  # workers replay them by path — all from one env so nobody disagrees about
+  # the location. A sibling of the rolling feed.
   REPLAY_FROZEN_ROOT: {{ .Values.datasetBuilder.frozenRoot | default (printf "%s/replay/frozen" .Values.datasets.mountPath) | quote }}
   {{- end }}
