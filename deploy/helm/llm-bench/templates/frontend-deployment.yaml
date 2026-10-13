@@ -50,6 +50,13 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+          # The Service keeps sending requests to a terminating pod for a few
+          # seconds; serve them, so a rolling upgrade drops none (it proxies
+          # the API).
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "8"]
           readinessProbe:
             httpGet:
               path: /health
