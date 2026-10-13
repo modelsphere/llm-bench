@@ -181,3 +181,75 @@ async def test_without_a_collector_the_backend_deletes_a_frozen_dataset(roots, a
     await api.delete_frozen_dataset("gone-soon", force=True, _admin=None, session=None)
     assert dataset_feed.list_frozen(None) == []
     assert not list((roots / "frozen").glob("gone-soon*"))
+
+
+# -- an import in progress -----------------------------------------------------
+
+
+class _StoppedUpload(_Upload):
+    """A request whose client goes away halfway through the body."""
+
+    async def stream(self):
+        yield self.body[: len(self.body) // 2]
+        raise api.ClientDisconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_upload_leaves_nothing_and_frees_the_name(roots, as_admin):
+    with pytest.raises(HTTPException) as stopped:
+        await api.import_frozen_dataset("halfway", _StoppedUpload(_records()))
+    assert stopped.value.status_code == 400
+    assert dataset_feed.list_imports(None) == []
+    assert not any((roots / "frozen" / dataset_feed.STAGING_DIRNAME).iterdir())
+
+    out = await api.import_frozen_dataset("halfway", _Upload(_records()))
+    assert out.records == 3
+
+
+def test_an_import_in_progress_is_listed_and_holds_its_name(roots):
+    entry = dataset_feed.begin_import(None, "big-one", by="ops")
+    dataset_feed.note_import(None, entry, received=1234)
+    [listed] = dataset_feed.list_imports(None)
+    assert (listed.name, listed.state, listed.received, listed.by) == (
+        "big-one", "uploading", 1234, "ops")
+    with pytest.raises(FileExistsError, match="already being imported"):
+        dataset_feed.begin_import(None, "big-one")
+
+
+def test_an_import_whose_process_died_gives_up_its_name(roots, monkeypatch):
+    dataset_feed.begin_import(None, "dead")
+    staged = dataset_feed.import_staged_path(None, "dead")
+    staged.write_bytes(b"half a file")
+    # A staged file from an import without a marker (older versions left these).
+    orphan = staged.parent / "import-older-1-2.part"
+    orphan.write_bytes(b"x")
+    monkeypatch.setattr(dataset_feed, "IMPORT_STALE_SECONDS", -1.0)
+
+    assert dataset_feed.list_imports(None) == []
+    assert not staged.exists() and not orphan.exists()
+    dataset_feed.begin_import(None, "dead")  # the name is free again
+
+
+@pytest.mark.asyncio
+async def test_the_list_shows_an_import_until_its_dataset_appears(roots, as_admin, monkeypatch):
+    seen = []
+    real_check = dataset_feed.check_dataset
+
+    def watching_check(path, *, compressed, on_progress=None):
+        seen.extend(dataset_feed.list_imports(None))
+        return real_check(path, compressed=compressed, on_progress=on_progress)
+
+    monkeypatch.setattr(dataset_feed, "check_dataset", watching_check)
+    await api.import_frozen_dataset("watched", _Upload(_records()))
+    assert [(e.name, e.state) for e in seen] == [("watched", "checking")]
+    assert dataset_feed.list_imports(None) == []
+
+
+@pytest.mark.asyncio
+async def test_a_meta_file_left_without_its_dataset_does_not_take_the_name(roots, as_admin):
+    base = roots / "frozen"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / f"leftover{dataset_feed.FROZEN_META_SUFFIX}").write_text('{"records": 99}')
+    out = await api.import_frozen_dataset("leftover", _Upload(_records()))
+    assert out.records == 3
+    assert dataset_feed.resolve_frozen(None, "leftover").records == 3

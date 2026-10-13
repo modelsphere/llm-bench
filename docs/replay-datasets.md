@@ -461,6 +461,12 @@ curl -sS -X PUT -T glm5-ondemand-20260823T093502Z.jsonl.gz \
   not a replay dataset answers **422** with the first line that is not; a taken
   name answers **409**; one larger than `REPLAY_IMPORT_MAX_GB` (20 by default)
   answers **413**.
+- While an import runs, `GET /replay-datasets/frozen` lists it under
+  `importing` (`state` `uploading` with the bytes received, then `checking`
+  with the records checked), and another import of the same name answers
+  **409**. The check runs to the end even if the client goes away: the dataset
+  appears when it is done. An upload stopped before it finished leaves nothing
+  behind, and an import whose backend died frees its name within two minutes.
 - `sha256` is of the uncompressed content, as a build's is, so an imported build
   keeps the hash it had where it was built. `source_profile` and
   `source_build_id` are optional provenance, shown with the dataset.

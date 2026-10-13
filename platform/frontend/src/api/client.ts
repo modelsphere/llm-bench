@@ -469,6 +469,18 @@ export interface FrozenDataset {
   used_by: string[]
 }
 
+// An import still in progress: the dataset appears among the frozen ones when
+// its upload and the check of every record are done.
+export interface FrozenImport {
+  name: string
+  state: 'uploading' | 'checking'
+  started_at?: string | null
+  updated_at?: string | null
+  received: number
+  checked: number
+  by: string
+}
+
 export const replayDatasetsApi = {
   listProfiles() {
     return api.get<{ profiles: ReplayDatasetProfile[]; collector_configured: boolean }>(
@@ -519,8 +531,9 @@ export const replayDatasetsApi = {
       + `/download?token=${encodeURIComponent(token)}`
   },
   listFrozen() {
-    return api.get<{ frozen: FrozenDataset[]; collector_configured: boolean }>(
-      '/replay-datasets/frozen')
+    return api.get<{
+      frozen: FrozenDataset[]; importing?: FrozenImport[]; collector_configured: boolean
+    }>('/replay-datasets/frozen')
   },
   removeFrozen(name: string, force = false) {
     return api.delete(`/replay-datasets/frozen/${encodeURIComponent(name)}`,
@@ -538,10 +551,12 @@ export const replayDatasetsApi = {
     name: string, file: File,
     source: { source_profile?: string; source_build_id?: string },
     onProgress?: (fraction: number) => void,
+    signal?: AbortSignal,
   ) {
     return api.put<FrozenDataset>(
       `/replay-datasets/frozen/${encodeURIComponent(name)}`, file, {
         params: source,
+        signal,
         headers: { 'Content-Type': 'application/octet-stream' },
         timeout: 0,
         onUploadProgress: (e) => { if (e.total) onProgress?.(e.loaded / e.total) },

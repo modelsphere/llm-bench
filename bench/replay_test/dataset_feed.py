@@ -35,7 +35,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -773,11 +773,17 @@ REPLAY_RECORD_KEYS = ("source_file", "line_no", "level", "timestamp", "request_i
                       "request_body")
 
 
-def check_dataset(path: "str | os.PathLike[str]", *, compressed: bool) -> "tuple[int, str]":
+def check_dataset(
+    path: "str | os.PathLike[str]",
+    *,
+    compressed: bool,
+    on_progress: "Callable[[int], None] | None" = None,
+) -> "tuple[int, str]":
     """Read a dataset file end to end: its record count, and the sha256 of its
     uncompressed content (what a build records, so a build downloaded from one
     installation and imported into another keeps its hash). Raises ValueError
-    naming the first line the replay runner could not use."""
+    naming the first line the replay runner could not use. `on_progress` gets
+    the records checked so far, every 10,000 records."""
     digest = hashlib.sha256()
     records = 0
     opener = gzip.open if compressed else open
@@ -801,6 +807,8 @@ def check_dataset(path: "str | os.PathLike[str]", *, compressed: bool) -> "tuple
                         "dataset record"
                     )
                 records += 1
+                if on_progress and records % 10_000 == 0:
+                    on_progress(records)
     except (OSError, EOFError) as exc:  # gzip.BadGzipFile is an OSError
         kind = "gzip file" if compressed else "file"
         raise ValueError(f"not a readable {kind}: {exc}") from None
@@ -820,6 +828,7 @@ def import_frozen(
     window_start: "datetime | None" = None,
     window_end: "datetime | None" = None,
     frozen_by: str = "",
+    on_progress: "Callable[[int], None] | None" = None,
 ) -> FrozenDataset:
     """Publish an uploaded dataset file as a frozen dataset. An import is always
     frozen: it has no collection behind it to roll.
@@ -827,7 +836,9 @@ def import_frozen(
     `staged_file` must be on the frozen root's filesystem (its staging dir), so
     publishing is a rename: a reader never sees a half-written dataset. It is
     checked first (`check_dataset`), and the name is create-once like a freeze.
-    The staged file is consumed either way."""
+    Only a dataset file takes a name: a meta sidecar left without one (its
+    dataset removed by hand) is replaced. The staged file is consumed either
+    way."""
     staged = Path(staged_file)
     try:
         validate_frozen_name(name)
@@ -835,9 +846,9 @@ def import_frozen(
         suffix = GZIP_SUFFIX if compressed else PLAIN_SUFFIX
         target = base / f"{name}{suffix}"
         meta_path = base / f"{name}{FROZEN_META_SUFFIX}"
-        if any((base / f"{name}{s}").exists() for s in DATASET_SUFFIXES) or meta_path.exists():
+        if any((base / f"{name}{s}").exists() for s in DATASET_SUFFIXES):
             raise FileExistsError(f"a frozen dataset named {name!r} already exists")
-        records, sha256 = check_dataset(staged, compressed=compressed)
+        records, sha256 = check_dataset(staged, compressed=compressed, on_progress=on_progress)
         base.mkdir(parents=True, exist_ok=True)
         os.replace(staged, target)
         _fsync_dir(base)
@@ -859,6 +870,142 @@ def import_frozen(
     os.replace(tmp_meta, meta_path)
     _fsync_dir(meta_path.parent)
     return dataset
+
+
+# An import in progress. A multi-GB upload, then a check of every record, takes
+# minutes, and the dataset only appears once both are done. So each import keeps
+# a marker in the staging dir, `import-<name>.json`, next to its staged file
+# `import-<name>.part`: the list shows it, and a second import of the same name
+# is refused while it lives. The importer rewrites the marker as it goes; one
+# not rewritten for IMPORT_STALE_SECONDS is an import whose process died, and is
+# swept with its staged file, which frees the name.
+IMPORT_STALE_SECONDS = 120.0
+_IMPORT_PREFIX = "import-"
+
+
+@dataclass(frozen=True)
+class FrozenImport:
+    name: str
+    state: str           # "uploading" or "checking"
+    started_at: "datetime | None" = None
+    updated_at: "datetime | None" = None
+    received: int = 0    # bytes received so far
+    checked: int = 0     # records checked so far
+    by: str = ""
+
+
+def import_staged_path(root: "str | os.PathLike[str] | None", name: str) -> Path:
+    return frozen_root(root) / STAGING_DIRNAME / f"{_IMPORT_PREFIX}{name}.part"
+
+
+def _import_marker_path(root: "str | os.PathLike[str] | None", name: str) -> Path:
+    return frozen_root(root) / STAGING_DIRNAME / f"{_IMPORT_PREFIX}{name}.json"
+
+
+def _read_import(marker: Path) -> "FrozenImport | None":
+    data = _read_frozen_meta(marker)
+    if not data.get("name"):
+        return None
+    return FrozenImport(
+        name=str(data["name"]),
+        state=str(data.get("state") or "uploading"),
+        started_at=_parse_dt(data.get("started_at")),
+        updated_at=_parse_dt(data.get("updated_at")),
+        received=int(data.get("received") or 0),
+        checked=int(data.get("checked") or 0),
+        by=str(data.get("by") or ""),
+    )
+
+
+def _import_is_stale(marker: Path, now: float) -> bool:
+    try:
+        return now - marker.stat().st_mtime > IMPORT_STALE_SECONDS
+    except OSError:
+        return True
+
+
+def _write_import(marker: Path, entry: FrozenImport) -> None:
+    tmp = marker.parent / f"{marker.name}.tmp"
+    tmp.write_text(json.dumps({
+        "name": entry.name, "state": entry.state,
+        "started_at": _iso_or_none(entry.started_at),
+        "updated_at": _iso_or_none(entry.updated_at),
+        "received": entry.received, "checked": entry.checked, "by": entry.by,
+    }), encoding="utf-8")
+    os.replace(tmp, marker)
+
+
+def begin_import(
+    root: "str | os.PathLike[str] | None", name: str, *, by: str = ""
+) -> FrozenImport:
+    """Claim `name` for an import. Raises FileExistsError while a frozen
+    dataset or a live import holds the name; an import whose process died
+    (its marker stale) gives the name up."""
+    validate_frozen_name(name)
+    marker = _import_marker_path(root, name)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    entry = FrozenImport(name=name, state="uploading", started_at=now, updated_at=now, by=by)
+    for _ in range(2):
+        try:
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            if not _import_is_stale(marker, time.time()):
+                live = _read_import(marker)
+                since = live.started_at.isoformat(timespec="seconds") if live and live.started_at else "?"
+                raise FileExistsError(
+                    f"{name!r} is already being imported ({live.state if live else 'uploading'}, "
+                    f"started {since}{f' by {live.by}' if live and live.by else ''})"
+                ) from None
+            abandon_import(root, name)
+            continue
+        os.close(fd)
+        _write_import(marker, entry)
+        return entry
+    raise FileExistsError(f"{name!r} is already being imported")
+
+
+def note_import(root: "str | os.PathLike[str] | None", entry: FrozenImport, **changes: Any) -> FrozenImport:
+    """Record an import's progress; also what keeps its marker from going stale."""
+    entry = replace(entry, updated_at=datetime.now(timezone.utc), **changes)
+    _write_import(_import_marker_path(root, entry.name), entry)
+    return entry
+
+
+def abandon_import(root: "str | os.PathLike[str] | None", name: str) -> None:
+    """End an import: its marker and its staged file go."""
+    for path in (_import_marker_path(root, name), import_staged_path(root, name)):
+        path.unlink(missing_ok=True)
+
+
+def list_imports(root: "str | os.PathLike[str] | None" = None) -> list[FrozenImport]:
+    """Imports in progress, oldest first. Sweeps what dead imports left behind:
+    stale markers, and staged `import-*.part` files no live import owns."""
+    staging = frozen_root(root) / STAGING_DIRNAME
+    if not staging.is_dir():
+        return []
+    now = time.time()
+    live: dict[str, FrozenImport] = {}
+    for marker in staging.glob(f"{_IMPORT_PREFIX}*.json"):
+        name = marker.name[len(_IMPORT_PREFIX):-len(".json")]
+        if _import_is_stale(marker, now):
+            try:
+                abandon_import(root, name)
+            except (OSError, ValueError):
+                pass
+            continue
+        entry = _read_import(marker)
+        if entry is not None:
+            live[entry.name] = entry
+    for part in staging.glob(f"{_IMPORT_PREFIX}*.part"):
+        if part.name[len(_IMPORT_PREFIX):-len(".part")] in live:
+            continue
+        try:
+            if now - part.stat().st_mtime > IMPORT_STALE_SECONDS:
+                part.unlink()
+        except OSError:
+            pass
+    return sorted(live.values(), key=lambda e: (e.started_at or datetime.min.replace(tzinfo=timezone.utc), e.name))
 
 
 def list_frozen(root: "str | os.PathLike[str] | None" = None) -> list[FrozenDataset]:
