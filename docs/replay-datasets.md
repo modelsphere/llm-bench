@@ -398,9 +398,11 @@ curl -sS "$API/replay-datasets/frozen" -H "$AUTH"
 curl -sS -X DELETE "$API/replay-datasets/frozen/acceptance-2026-q3?force=true" -H "$AUTH"
 ```
 
-Freezing and deleting need the collector (it is the writer of the datasets
-volume); **listing does not** — it reads the volume directly, so the frozen
-inventory is visible even when the collector is down.
+Freezing needs the collector (it is the writer of the datasets volume);
+**listing does not** — it reads the volume directly, so the frozen inventory is
+visible even when the collector is down. Deleting goes through the collector
+when one is configured; an installation without one (frozen datasets only, by
+import) has the backend delete the files itself.
 
 ---
 

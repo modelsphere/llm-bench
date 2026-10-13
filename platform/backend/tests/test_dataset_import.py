@@ -170,3 +170,14 @@ async def test_downloading_a_missing_frozen_dataset_is_a_404(roots, as_admin):
     with pytest.raises(HTTPException) as missing:
         await api.download_frozen("nope", _Upload(b""))
     assert missing.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_without_a_collector_the_backend_deletes_a_frozen_dataset(roots, as_admin, monkeypatch):
+    # An installation with a datasets volume but no collector imports frozen
+    # datasets through the backend, so it must be able to remove them too.
+    monkeypatch.setattr(api, "collector_base_url", lambda: "")
+    await api.import_frozen_dataset("gone-soon", _Upload(_records()))
+    await api.delete_frozen_dataset("gone-soon", force=True, _admin=None, session=None)
+    assert dataset_feed.list_frozen(None) == []
+    assert not list((roots / "frozen").glob("gone-soon*"))
