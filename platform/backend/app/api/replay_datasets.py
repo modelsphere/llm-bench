@@ -149,7 +149,7 @@ def _frozen_from_disk() -> list[FrozenDatasetResponse]:
             sha256=d.sha256, frozen_at=d.frozen_at,
             source_profile=d.source_profile, source_build_id=d.source_build_id,
             window_start=d.window_start, window_end=d.window_end,
-            frozen_by=d.frozen_by,
+            frozen_by=d.frozen_by, origin=d.origin,
         )
         for d in dataset_feed.list_frozen(None)
     ]
@@ -766,7 +766,7 @@ async def freeze_build(
 
 @router.get("/frozen", response_model=FrozenListResponse)
 async def list_frozen_datasets(
-    _admin: User = Depends(require_admin),
+    _admin: User = Depends(require_service_or_admin),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Every frozen dataset, with the benchmarks (if any) that currently replay
@@ -807,3 +807,114 @@ async def delete_frozen_dataset(
         raise HTTPException(status_code=resp.status_code, detail=_collector_detail(resp))
     if resp.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"Collector refused the delete: {resp.text[:300]}")
+
+
+# ---------------------------------------------------------------------------
+# Moving frozen datasets between installations: download one, import a file
+# ---------------------------------------------------------------------------
+
+# Imports bigger than this are refused while they stream in, before they fill
+# the datasets volume. REPLAY_IMPORT_MAX_GB overrides.
+_IMPORT_MAX_BYTES = int(float(os.getenv("REPLAY_IMPORT_MAX_GB", "20")) * (1 << 30))
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+@router.get("/frozen/{name}/download")
+async def download_frozen(name: str, request: Request, token: str | None = None):
+    """Download a frozen dataset file as it sits on the volume, to import it
+    into another installation. Admin, via `?token=` or the Authorization
+    header, like a build download; no session is held while it streams."""
+    async with _async_session_factory() as session:
+        await _download_admin(request, token, session)
+    dataset = await asyncio.to_thread(_resolve_frozen, name)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail=f"No frozen dataset named {name!r}")
+    path = Path(dataset.path)
+    return FileResponse(
+        path,
+        media_type="application/gzip" if path.name.endswith(".gz") else "application/x-ndjson",
+        filename=path.name,
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
+    )
+
+
+@router.put(
+    "/frozen/{name}", response_model=FrozenDatasetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_frozen_dataset(
+    name: str,
+    request: Request,
+    source_profile: str = "",
+    source_build_id: str = "",
+    token: str | None = None,
+):
+    """Import a dataset file as the frozen dataset `name`: the request body is
+    the file, `.jsonl` or `.jsonl.gz` (told apart by its first bytes), such as
+    a build or frozen dataset downloaded from another installation. Imports
+    are always frozen: nothing collects into them.
+
+    The body is streamed straight into the datasets volume's staging directory
+    and published by rename, with no copy in between and no database session
+    held while it arrives. Every record is checked to be one the replay runner
+    can read before the dataset appears; `sha256` is of the uncompressed
+    content, as a build's is, so an imported build keeps the hash it had where
+    it was built. Admin only. Refuses a taken name (409), a file that is not a
+    replay dataset (422), and one past REPLAY_IMPORT_MAX_GB (413)."""
+    from bench.replay_test import dataset_feed
+
+    async with _async_session_factory() as session:
+        admin = await _download_admin(request, token, session)
+        frozen_by = getattr(admin, "username", None) or str(admin.id)
+    try:
+        dataset_feed.validate_frozen_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    if await asyncio.to_thread(_resolve_frozen, name) is not None:
+        raise HTTPException(status_code=409, detail=f"A frozen dataset named {name!r} exists")
+
+    staging = dataset_feed.frozen_root(None) / dataset_feed.STAGING_DIRNAME
+    await asyncio.to_thread(staging.mkdir, parents=True, exist_ok=True)
+    staged = staging / f"import-{name}-{os.getpid()}-{id(request)}.part"
+    received = 0
+    head = b""
+    try:
+        with open(staged, "wb") as out:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                if len(head) < 2:
+                    head += chunk[: 2 - len(head)]
+                received += len(chunk)
+                if received > _IMPORT_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"larger than the {_IMPORT_MAX_BYTES >> 30} GB import limit "
+                               "(REPLAY_IMPORT_MAX_GB)",
+                    )
+                await asyncio.to_thread(out.write, chunk)
+        if not received:
+            raise HTTPException(status_code=422, detail="the request body is empty")
+        try:
+            dataset = await asyncio.to_thread(
+                dataset_feed.import_frozen, None, name, staged,
+                compressed=head == _GZIP_MAGIC,
+                source_profile=source_profile.strip()[:64],
+                source_build_id=source_build_id.strip()[:64],
+                frozen_by=frozen_by,
+            )
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"not a replay dataset: {exc}") from None
+    finally:
+        staged.unlink(missing_ok=True)
+    logger.info("[replay-datasets] %s imported frozen dataset %s (%d records)",
+                frozen_by, name, dataset.records)
+    return FrozenDatasetResponse(
+        name=dataset.name, path=dataset.path, bytes=dataset.bytes, records=dataset.records,
+        sha256=dataset.sha256, frozen_at=dataset.frozen_at,
+        source_profile=dataset.source_profile, source_build_id=dataset.source_build_id,
+        window_start=dataset.window_start, window_end=dataset.window_end,
+        frozen_by=dataset.frozen_by, origin=dataset.origin,
+    )

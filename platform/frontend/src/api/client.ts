@@ -464,6 +464,8 @@ export interface FrozenDataset {
   window_start?: string | null
   window_end?: string | null
   frozen_by: string
+  /** "upload" when it was imported from a file; "" when frozen from a build here. */
+  origin?: string
   used_by: string[]
 }
 
@@ -523,6 +525,27 @@ export const replayDatasetsApi = {
   removeFrozen(name: string, force = false) {
     return api.delete(`/replay-datasets/frozen/${encodeURIComponent(name)}`,
       { params: { force } })
+  },
+  // A direct link, for the same reason as buildDownloadUrl.
+  frozenDownloadUrl(name: string) {
+    const token = localStorage.getItem('token') || ''
+    return `${API_BASE}/replay-datasets/frozen/${encodeURIComponent(name)}`
+      + `/download?token=${encodeURIComponent(token)}`
+  },
+  // The file is the request body, sent as-is: no multipart, no Blob copy, so a
+  // multi-GB dataset streams to the backend. Always frozen once imported.
+  importFrozen(
+    name: string, file: File,
+    source: { source_profile?: string; source_build_id?: string },
+    onProgress?: (fraction: number) => void,
+  ) {
+    return api.put<FrozenDataset>(
+      `/replay-datasets/frozen/${encodeURIComponent(name)}`, file, {
+        params: source,
+        headers: { 'Content-Type': 'application/octet-stream' },
+        timeout: 0,
+        onUploadProgress: (e) => { if (e.total) onProgress?.(e.loaded / e.total) },
+      })
   },
 }
 

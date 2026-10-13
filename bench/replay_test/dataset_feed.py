@@ -29,6 +29,8 @@ on disk.
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import os
 import re
@@ -612,6 +614,9 @@ class FrozenDataset:
     window_start: "datetime | None" = None
     window_end: "datetime | None" = None
     frozen_by: str = ""
+    # "upload" for a dataset imported from a file (from another installation,
+    # typically); empty for one frozen out of this installation's own feed.
+    origin: str = ""
 
     def to_meta(self) -> dict:
         return {
@@ -627,6 +632,7 @@ class FrozenDataset:
             "window_start": _iso_or_none(self.window_start),
             "window_end": _iso_or_none(self.window_end),
             "frozen_by": self.frozen_by,
+            "origin": self.origin,
         }
 
 
@@ -661,6 +667,7 @@ def _frozen_from_path(base: Path, dataset: Path) -> "FrozenDataset | None":
         window_start=_parse_dt(meta.get("window_start")),
         window_end=_parse_dt(meta.get("window_end")),
         frozen_by=str(meta.get("frozen_by") or ""),
+        origin=str(meta.get("origin") or ""),
     )
 
 
@@ -750,6 +757,99 @@ def freeze(
         window_start=window_start,
         window_end=window_end,
         frozen_by=frozen_by,
+    )
+    tmp_meta = meta_path.parent / f"{meta_path.name}.tmp"
+    with tmp_meta.open("w", encoding="utf-8") as handle:
+        json.dump(dataset.to_meta(), handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_meta, meta_path)
+    _fsync_dir(meta_path.parent)
+    return dataset
+
+
+# What the replay runner reads from every record (log_replay_tool.load_extract_jsonl).
+REPLAY_RECORD_KEYS = ("source_file", "line_no", "level", "timestamp", "request_id",
+                      "request_body")
+
+
+def check_dataset(path: "str | os.PathLike[str]", *, compressed: bool) -> "tuple[int, str]":
+    """Read a dataset file end to end: its record count, and the sha256 of its
+    uncompressed content (what a build records, so a build downloaded from one
+    installation and imported into another keeps its hash). Raises ValueError
+    naming the first line the replay runner could not use."""
+    digest = hashlib.sha256()
+    records = 0
+    opener = gzip.open if compressed else open
+    try:
+        with opener(path, "rb") as handle:
+            for line_no, raw in enumerate(handle, start=1):
+                digest.update(raw)
+                text = raw.strip()
+                if not text:
+                    continue
+                try:
+                    record = json.loads(text)
+                except ValueError:
+                    raise ValueError(f"line {line_no} is not JSON") from None
+                if not isinstance(record, dict):
+                    raise ValueError(f"line {line_no} is not a JSON object")
+                missing = [key for key in REPLAY_RECORD_KEYS if key not in record]
+                if missing:
+                    raise ValueError(
+                        f"line {line_no} has no {', '.join(missing)}: not a replay "
+                        "dataset record"
+                    )
+                records += 1
+    except (OSError, EOFError) as exc:  # gzip.BadGzipFile is an OSError
+        kind = "gzip file" if compressed else "file"
+        raise ValueError(f"not a readable {kind}: {exc}") from None
+    if not records:
+        raise ValueError("the file holds no records")
+    return records, digest.hexdigest()
+
+
+def import_frozen(
+    root: "str | os.PathLike[str] | None",
+    name: str,
+    staged_file: "str | os.PathLike[str]",
+    *,
+    compressed: bool,
+    source_profile: str = "",
+    source_build_id: str = "",
+    window_start: "datetime | None" = None,
+    window_end: "datetime | None" = None,
+    frozen_by: str = "",
+) -> FrozenDataset:
+    """Publish an uploaded dataset file as a frozen dataset. An import is always
+    frozen: it has no collection behind it to roll.
+
+    `staged_file` must be on the frozen root's filesystem (its staging dir), so
+    publishing is a rename: a reader never sees a half-written dataset. It is
+    checked first (`check_dataset`), and the name is create-once like a freeze.
+    The staged file is consumed either way."""
+    staged = Path(staged_file)
+    try:
+        validate_frozen_name(name)
+        base = frozen_root(root)
+        suffix = GZIP_SUFFIX if compressed else PLAIN_SUFFIX
+        target = base / f"{name}{suffix}"
+        meta_path = base / f"{name}{FROZEN_META_SUFFIX}"
+        if any((base / f"{name}{s}").exists() for s in DATASET_SUFFIXES) or meta_path.exists():
+            raise FileExistsError(f"a frozen dataset named {name!r} already exists")
+        records, sha256 = check_dataset(staged, compressed=compressed)
+        base.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, target)
+        _fsync_dir(base)
+    finally:
+        staged.unlink(missing_ok=True)
+
+    dataset = FrozenDataset(
+        name=name, path=str(target), bytes=target.stat().st_size, records=records,
+        sha256=sha256, frozen_at=datetime.now(timezone.utc),
+        source_profile=source_profile, source_build_id=source_build_id,
+        window_start=window_start, window_end=window_end, frozen_by=frozen_by,
+        origin="upload",
     )
     tmp_meta = meta_path.parent / f"{meta_path.name}.tmp"
     with tmp_meta.open("w", encoding="utf-8") as handle:

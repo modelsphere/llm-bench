@@ -233,8 +233,12 @@ def test_a_service_account_cannot_touch_someone_elses_profile(client):
     assert client.delete(f"/replay-datasets/profiles/{pid}", headers=headers).status_code == 403
     assert client.post(f"/replay-datasets/profiles/{pid}/probe", headers=headers,
                        json={"hours": 1}).status_code == 403
-    # Freezing datasets stays an admin's job.
-    assert client.get("/replay-datasets/frozen", headers=headers).status_code == 403
+    # It may see the frozen datasets, to replay one; making, importing and
+    # removing them stays an admin's job.
+    assert client.get("/replay-datasets/frozen", headers=headers).status_code == 200
+    assert client.put("/replay-datasets/frozen/mine", headers=headers,
+                      content=b"{}").status_code == 403
+    assert client.delete("/replay-datasets/frozen/any", headers=headers).status_code == 403
 
 
 def test_an_ordinary_user_cannot_create_profiles(client):
