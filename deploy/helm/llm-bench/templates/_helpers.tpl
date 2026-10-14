@@ -63,22 +63,14 @@ Create the name of the service account to use
 PostgreSQL service name
 */}}
 {{- define "llm-bench.postgresql.fullname" -}}
-{{- if .Values.postgresql.enabled }}
-{{- printf "%s-postgresql" .Release.Name | trunc 63 | trimSuffix "-" }}
-{{- else }}
 {{- printf "%s-postgres" (include "llm-bench.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
 {{- end }}
 
 {{/*
-Redis master service name
+Redis service name
 */}}
 {{- define "llm-bench.redis.fullname" -}}
-{{- if .Values.redis.enabled }}
-{{- printf "%s-redis-master" .Release.Name | trunc 63 | trimSuffix "-" }}
-{{- else }}
 {{- printf "%s-redis" (include "llm-bench.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
 {{- end }}
 
 {{/*

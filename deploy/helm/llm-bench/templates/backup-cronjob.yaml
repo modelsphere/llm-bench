@@ -1,7 +1,4 @@
 {{- if .Values.backup.enabled }}
-{{- if not .Values.postgresql.enabled }}
-# Backups make no sense when the chart is pointed at an external postgres
-# (postgresql.enabled=true). Skip the whole block in that case.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -106,5 +103,4 @@ spec:
           tolerations:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-{{- end }}
 {{- end }}

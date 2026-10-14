@@ -7,12 +7,8 @@ Services:
   Backend:  {{ include "llm-bench.fullname" . }}-backend:8000
   Frontend: {{ include "llm-bench.fullname" . }}-frontend:80
   Worker:   {{ include "llm-bench.fullname" . }}-worker (Dramatiq)
-{{- if .Values.postgresql.enabled }}
   Postgres: {{ include "llm-bench.postgresql.fullname" . }}:5432
-{{- end }}
-{{- if .Values.redis.enabled }}
   Redis:    {{ include "llm-bench.redis.fullname" . }}:6379
-{{- end }}
 
 {{- if .Values.ingress.enabled }}
 Ingress:

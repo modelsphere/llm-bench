@@ -1,4 +1,3 @@
-{{- if not .Values.redis.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -84,4 +83,3 @@ spec:
   selector:
     {{- include "llm-bench.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: redis
-{{- end }}

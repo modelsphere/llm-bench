@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A VictoriaLogs probe reports the sample's prompt tokens, read from the
   flattened `resp_meta.usage.prompt_tokens`.
 
+### Removed
+
+- The chart's Bitnami PostgreSQL and Redis subcharts (`postgresql.enabled`,
+  `redis.enabled`) and their vendored archives. Neither rendered when switched
+  on, and the chart's own Postgres and Redis were always what ran. The chart
+  now has no dependencies; `Chart.yaml` gains `home`, `sources` and
+  `keywords`.
+
 ## [0.2.0] - 2026-10-10
 
 Versioned with LLM AutoTune 0.2.0, which it is tested with.
