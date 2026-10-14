@@ -391,13 +391,9 @@ serviceMonitor:
 # ---------------------------------------------------------------------------
 # PostgreSQL
 # ---------------------------------------------------------------------------
-# By default we use a lightweight custom Deployment (postgres:16-alpine)
-# that mirrors the docker-compose setup.  Set postgresql.enabled: true
-# to switch to the Bitnami PostgreSQL sub-chart instead.
+# A single postgres:16-alpine instance with its own volume, the same as the
+# docker-compose setup.
 # ---------------------------------------------------------------------------
-postgresql:
-  enabled: false
-
 postgres:
   image:
     registry: docker.io
@@ -474,12 +470,9 @@ backup:
 # ---------------------------------------------------------------------------
 # Redis
 # ---------------------------------------------------------------------------
-# By default we use a lightweight custom Deployment (redis:7-alpine)
-# that mirrors the docker-compose setup.  Set redis.enabled: true
-# to switch to the Bitnami Redis sub-chart instead.
+# A single redis:7-alpine instance, the same as the docker-compose setup.
 # ---------------------------------------------------------------------------
 redis:
-  enabled: false
   image:
     registry: docker.io
     repository: library/redis
