@@ -10,7 +10,7 @@
     "lint": "eslint . --ext .vue,.ts,.tsx"
   },
   "dependencies": {
-    "axios": "^1.7.0",
+    "axios": "^1.20.0",
     "chart.js": "^4.5.1",
     "dompurify": "^3.4.12",
     "marked": "^18.0.6",
