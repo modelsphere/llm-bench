@@ -21,10 +21,15 @@ fullnameOverride: ""
 # ---------------------------------------------------------------------------
 replicaCount:
   backend: 1
-  # Concurrent benchmark runs = worker pods x app.worker.processes. Sized for a
-  # first install; a production deployment runs e.g. 4 pods x 8 processes
-  # (32 concurrent runs) with the worker resources below scaled to match.
-  worker: 1
+  # Concurrent benchmark runs = worker pods x app.worker.processes x
+  # app.worker.threads: 4 x 8 x 1 = 32 by default. A run that finds every slot
+  # taken waits in the queue — for everyone, service accounts included (the
+  # per-user cap, app.maxActiveSubmissionsPerUser, is a separate fairness limit
+  # those are exempt from). A client that benchmarks many endpoints at once
+  # (AutoTune: one run per trial in flight) needs at least that many slots.
+  # More than one worker pod needs the datasets volume mountable from several
+  # nodes (ReadOnlyMany / ReadWriteMany) when datasets.enabled.
+  worker: 4
   frontend: 1
 
 # ---------------------------------------------------------------------------
@@ -67,19 +72,21 @@ resources:
       cpu: 500m
       memory: 1Gi
   worker:
-    # Memory scales with app.worker.processes: each process holds the bench +
-    # sqlalchemy import tree, and one replay keeps its record set resident
-    # (~0.5 GB). Budget ~3 GiB per process at peak — the default below is for
-    # 2 processes; for 8, use requests 8Gi / limits 24Gi. An OOM kill is
-    # survivable (the reaper marks the submission FAILED), just wasteful.
+    # Memory scales with app.worker.processes. A process starts at ~65 MiB with
+    # its imports and grows to its run's peak, which it keeps: measured ~1.3 GiB
+    # after replays of 1000 requests at concurrency 64 with ~28k-token prompts.
+    # Budget ~2 GiB per process — the default limit is for 8 processes. Idle
+    # workers hold little (~325 MiB a pod of 8), so the request stays small and
+    # the pods schedule anywhere. An OOM kill is survivable (the reaper marks
+    # the submission FAILED), just wasteful.
     #
     # ephemeral-storage bounds per-submission scratch dirs under /tmp
     # (~100 MB per ordinary run, ~1.4 GB for a replay with save_responses).
     # Setting it means an overfull node evicts the run that ballooned, not a
     # bystander — postgres may share the node.
     limits:
-      cpu: 4000m
-      memory: 8Gi
+      cpu: 8000m
+      memory: 16Gi
       ephemeral-storage: 10Gi
     requests:
       cpu: 500m
@@ -218,14 +225,14 @@ app:
   # dramatiq master respawns it within seconds). Threads inside a process share
   # fate — one bad task can take down all T threads.
   #
-  # Default: 4 processes × 1 thread = max isolation (1 task per process).
+  # Default: 8 processes × 1 thread per pod = max isolation (1 task per process).
   # Increase processes (and memory limit) for more parallelism per pod;
   # increase threads only if you trust all modules to be crash-safe.
   worker:
     # Concurrent runs per worker pod. Tasks are I/O-bound (they wait on the
     # endpoint under test), so this is memory-bound, not CPU-bound; keep the
     # memory limit sized to processes x per-task peak (see resources.worker).
-    processes: 2
+    processes: 8
     threads: 1
 
     # --- Live-hang diagnosability -------------------------------------------

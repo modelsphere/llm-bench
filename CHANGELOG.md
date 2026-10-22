@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The chart runs 32 benchmarks at once by default: 4 worker pods × 8 processes
+  (was 1 × 2), with each pod's memory limit at 16 Gi and its CPU limit at 8.
+  Sizing docs give the measured memory per process (about 1.3 GiB at peak for a
+  large replay, not 3 GiB) and say plainly that the run queue applies to every
+  account, service accounts included.
+
 ## [0.3.0] - 2026-10-15
 
 ### Added

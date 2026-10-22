@@ -55,12 +55,20 @@ works there too; it is downloaded at first use, through `HF_ENDPOINT` if set.
 
 ## Sizing
 
-Concurrent benchmark runs = `replicaCount.worker` × `app.worker.processes`.
-The defaults (1 × 2) fit a small cluster. Each process peaks around 3 GiB — a
-replay keeps its record set resident — so scale `resources.worker` with the
-process count; a busy deployment runs 4 pods × 8 processes with
-`requests: 8Gi` / `limits: 24Gi` per pod. Runs are I/O-bound (they wait on the
-endpoint under test): memory is the constraint, not CPU.
+Concurrent benchmark runs = `replicaCount.worker` × `app.worker.processes` ×
+`app.worker.threads`. The defaults, 4 pods × 8 processes × 1 thread, run 32 at
+once. A submission that finds every slot taken waits in the queue, whoever sent
+it: service accounts skip the per-user cap (`app.maxActiveSubmissionsPerUser`),
+not the queue. Size the slots to the most runs your clients start together.
+AutoTune, for example, starts one run per trial in flight plus its validation
+runs side by side.
+
+A worker process starts at about 65 MiB and keeps its largest run's peak:
+about 1.3 GiB after a replay of 1000 requests at concurrency 64 with ~28k-token
+prompts. Budget 2 GiB per process in `resources.worker.limits.memory` (16 Gi for
+the default 8). Runs are I/O-bound (they wait on the endpoint under test), so
+idle pods hold little and the request can stay small. More than one worker pod
+needs the datasets volume mountable from several nodes (ROX/RWX).
 
 Postgres connections: budget worker processes × 2 + backend replicas × 15, and
 keep it under `postgres.maxConnections` (150).
