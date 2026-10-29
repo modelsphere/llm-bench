@@ -5,8 +5,6 @@ metadata:
   labels:
     {{- include "llm-bench.labels" . | nindent 4 }}
 data:
-  DATABASE_URL: "postgresql+asyncpg://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ include "llm-bench.postgresql.fullname" . }}:5432/{{ .Values.postgres.database }}"
-  DATABASE_URL_SYNC: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ include "llm-bench.postgresql.fullname" . }}:5432/{{ .Values.postgres.database }}"
   ALLOWED_ORIGINS: {{ .Values.app.allowedOrigins | quote }}
   BENCH_MODULES_PATH: {{ .Values.app.benchModulesPath | quote }}
   # Writable cache dirs. The pod runs as non-root UID 1000 (see podSecurityContext)
