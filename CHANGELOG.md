@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The endpoint and judge preflights wait 60 s for an answer (was 20 s). An
+  engine's first forward can take half a minute, and the preflight is often
+  that first request, so healthy endpoints failed it as "timed out".
+
 - The chart runs 32 benchmarks at once by default: 4 worker pods × 8 processes
   (was 1 × 2), with each pod's memory limit at 16 Gi and its CPU limit at 8.
   Sizing docs give the measured memory per process (about 1.3 GiB at peak for a

@@ -54,9 +54,11 @@ from bench.tests.functional.opencompass import _parse_simpleqa_grade
 
 # Bounded so a slow or misbehaving endpoint can't tie up a worker thread or
 # flood memory. connect is short (a dead host should fail fast); read is longer
-# to tolerate a genuinely slow first token.
+# to tolerate a genuinely slow first token — an engine's first forward can take
+# half a minute (graph set-up on some accelerators), and 20 s failed healthy
+# endpoints.
 _CONNECT_TIMEOUT = 8.0
-_READ_TIMEOUT = 20.0
+_READ_TIMEOUT = 60.0
 _MAX_BODY_CHARS = 600
 
 # HTTP/1.1 — guidellm forces http2=False for the load generator, so the probe
