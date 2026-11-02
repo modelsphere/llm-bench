@@ -217,6 +217,8 @@ jobs:
                  --set postgres.password=x)
           helm lint deploy/helm/llm-bench "${STUBS[@]}"
           helm template ci deploy/helm/llm-bench "${STUBS[@]}" > /dev/null
+          # No values at all: every secret generated, the service key too.
+          helm template ci deploy/helm/llm-bench --set secrets.serviceAccount=true > /dev/null
           helm template ci deploy/helm/llm-bench "${STUBS[@]}" \
             --set datasets.enabled=true --set datasetBuilder.enabled=true \
             --set datasetBuilder.bodylog.hostPath=/data/bodylog \

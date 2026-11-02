@@ -177,13 +177,16 @@ ingress:
   #      - llm-bench.example.com     # must match the host above
 
 # ---------------------------------------------------------------------------
-# Application secrets  (REQUIRED — must be overridden at install time)
+# Application secrets. Each one left empty is generated on install and kept on
+# upgrade, in the release's Secret (kept on uninstall, with the database
+# volume). Read a generated admin password with
+#   kubectl get secret <release> -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d
 # ---------------------------------------------------------------------------
 secrets:
   secretKey: ""
   platformSecretKey: ""
-  adminEmail: ""
-  adminUsername: ""
+  adminEmail: ""             # empty = admin@example.com
+  adminUsername: ""          # empty = admin
   adminPassword: ""
   # Optional: a `service` account for another platform — LLM AutoTune — and the
   # API key it authenticates with. Give the SAME value to the other platform
@@ -194,6 +197,10 @@ secrets:
   # admin: no users, no card types, no collection profiles.
   serviceUsername: "autotune"
   serviceApiKey: ""
+  # true = create the service account even with no serviceApiKey given: its key
+  # is generated once and kept, and read from this release's Secret
+  # (SERVICE_API_KEY) by AutoTune in the same namespace.
+  serviceAccount: false
 
 # ---------------------------------------------------------------------------
 # Application config

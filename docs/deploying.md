@@ -23,6 +23,11 @@ Open <http://localhost:8080> and sign in with the admin the script printed.
 `--service-key` is only needed if LLM AutoTune (or another platform) will
 submit here; see [Connecting LLM AutoTune](#connecting-llm-autotune).
 
+The secrets file is optional. Every secret it would set (`secrets.*`,
+`postgres.password`) is generated on install when not given and kept on
+upgrade, in the release's Secret; read a generated admin password with
+`kubectl -n llm-bench get secret llm-bench -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d`.
+
 What a release contains: the API (`backend`), the benchmark `worker`, the
 `frontend` (nginx serving the SPA and proxying `/api`), Postgres, Redis, and a
 `migrate` Job that runs after every install and upgrade. That Job applies the
@@ -135,10 +140,13 @@ dataset builds, and preflight endpoints — never manage users or other people's
 benchmarks.
 
 1. Generate a key and give it to LLMBench: `secrets.serviceApiKey`
-   (`gen-prod-secrets.sh --service-key` does this). Upgrade the release; the
-   migrate Job creates the account.
-2. Give AutoTune the same value: `llmbench.apiKey` in its chart, and
-   `llmbench.url` pointing at LLMBench's backend service —
+   (`gen-prod-secrets.sh --service-key` does this), or set
+   `secrets.serviceAccount=true` to have the chart generate one and keep it in
+   the release's Secret (`SERVICE_API_KEY`). Upgrade the release; the migrate
+   Job creates the account.
+2. Give AutoTune the same value: `llmbench.apiKey` in its chart, or, installed
+   in the same namespace, `llmbench.apiKeySecret.name` naming this release's
+   Secret; and `llmbench.url` pointing at LLMBench's backend service —
    `http://llm-bench-backend.llm-bench:8000` from inside the cluster.
 
 The contract AutoTune relies on — routes, metric names, run identity — is in

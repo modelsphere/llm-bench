@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The chart installs with no values.** `secrets.secretKey`,
+  `platformSecretKey`, `adminPassword` and `postgres.password` are generated on
+  install when not given and kept on upgrade; `adminEmail` and
+  `adminUsername` default to `admin@example.com` and `admin`.
+- **`secrets.serviceAccount=true`** creates the service account with a
+  generated key, kept in the release's Secret as `SERVICE_API_KEY`, which LLM
+  AutoTune in the same namespace reads directly.
+
 ### Changed
 
+- The database URLs moved from the ConfigMap to the Secret: they carry the
+  Postgres password.
 - The endpoint and judge preflights wait 60 s for an answer (was 20 s). An
   engine's first forward can take half a minute, and the preflight is often
   that first request, so healthy endpoints failed it as "timed out".
