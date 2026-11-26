@@ -534,7 +534,17 @@
     "importInFlightChecking": "checking records, {count} so far",
     "importSubmit": "Import",
     "importFailed": "Import failed",
-    "originUpload": "imported"
+    "originUpload": "imported",
+    "fLayout": "Layout",
+    "layoutSampled": "Sampled: single requests spread over the window",
+    "layoutTimed": "Timed: every request of one window, in time order, for a 1× replay",
+    "layoutTimedShort": "timed",
+    "fLayoutHint": "Timed keeps a whole stretch of traffic (Sample size requests, at typical load) with each request's send time and session, so a replay can send them as production did.",
+    "fSessionField": "Session field",
+    "fSessionFieldHint": "Where the logs keep a session id, as a dotted field. Empty: sessions are rebuilt from message prefixes.",
+    "fMaxIdleGap": "Longest idle gap (s)",
+    "fMaxIdleGapHint": "Stretches with nothing in flight are shortened to this, so a quiet hour replays in minutes.",
+    "timedLine": "{requests} requests in {sessions} sessions, {following}% follow an earlier turn; {real} min of traffic replays in {replay} min; typical {c} in flight."
   },
   "users": {
     "subtitle": "Only super admins can promote or revoke admins. The super admin role is granted directly in the backend, not here.",
@@ -684,5 +694,51 @@
     "ready": "✓ Judge looks ready",
     "problems": "✗ Problems found — fix before saving",
     "runFailed": "Judge test failed to run"
+  },
+  "loadReading": {
+    "title": "Load over the last {hours} h",
+    "help": "Read from the gateway logs alone. Requests are grouped by how many others were in flight while they ran; a fitted model of request size tells how much slower the same request gets at each level. The knee is where extra load stops turning into throughput and mostly waits.",
+    "cat": {
+      "idle": "idle",
+      "moderate": "moderate",
+      "busy": "busy",
+      "unclear": "unclear"
+    },
+    "say": {
+      "idle": "Idle: only {share} of requests were served past the knee ({knee}+ in flight). The backend has room; a better config shows up as lower latency.",
+      "moderate": "Moderate: {share} of requests were served past the knee ({knee}+ in flight), where extra load mostly waits instead of adding throughput.",
+      "busy": "Busy: {share} of requests were served past the knee ({knee}+ in flight). The typical request already waits; a better config shows up as more throughput."
+    },
+    "noKnee": "Idle: latency barely grows with load, up to the {max} requests in flight production reached. No knee in sight.",
+    "idleNoOverlap": "Idle: only {share} of requests ran with two or more in flight, too few to reach any knee.",
+    "unclear": "Unclear: the model of request size does not fit this traffic well enough ({checks}). Taken at face value it would read {fitted}.",
+    "tooLittle": "Not enough traffic to read the load: {note}.",
+    "failed": "No load reading for this build: {error}",
+    "chartAria": "Slowdown of the same request and number of requests at each level of concurrency",
+    "slowdownAxis": "same request, slower by",
+    "requestsAxis": "requests",
+    "xAxis": "requests in flight while it ran",
+    "knee": "knee",
+    "tip": "{group} in flight: {requests} requests ({share} at this level or above). Same request {slowdown}× slower than at 1 (raw median {raw}×); e into this level {e}. Mean prompt {prompt} tok, output {out} tok.",
+    "typical": "typical in flight",
+    "busiest": "in flight, busiest hours",
+    "requests": "requests read",
+    "window": "window",
+    "fitTitle": "How far to trust it",
+    "check": {
+      "r2": "request size explains the latency (R² {r2} on log latency, needs 0.5)",
+      "no_drift_by_time_of_day": "no leftover pattern by time of day",
+      "halves_agree": "even and odd days give w_log at most 0.15 apart (even: {even}, odd: {odd})",
+      "single_crossing": "the curve crosses the knee once ({crossings} extra crossings)"
+    },
+    "checkShort": {
+      "r2": "low R²",
+      "no_drift_by_time_of_day": "drift by time of day",
+      "halves_agree": "halves disagree",
+      "single_crossing": "several crossings"
+    },
+    "sizeLine": "Size of a request on its own: {fixed} s + {uncached} s per 1k uncached prompt tokens + {cached} s per 1k cached + {output} s per 1k output tokens.",
+    "pastKnee": "{share} of requests past the knee",
+    "noteOnly": "(a note: does not change the reading)"
   }
 }

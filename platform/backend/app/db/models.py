@@ -520,6 +520,13 @@ class ReplayDatasetProfile(Base):
     # ceiling on the sample; raise it (or subwindow_minutes) to capture a bursty
     # model fully. Exposed in the admin editor with the derived cap shown live.
     max_carry_multiple: Mapped[int] = mapped_column(Integer, default=4, server_default=text("4"))
+    # "sampled" | "timed" (every request of one window, in time order, with its
+    # send time and session — app.datasets.timed).
+    layout: Mapped[str] = mapped_column(String(16), default="sampled", server_default="sampled")
+    # Dotted field of the log record holding a session id; empty = rebuilt
+    # from message prefixes.
+    session_field: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    max_idle_gap_s: Mapped[float] = mapped_column(Float, default=5.0, server_default=text("5.0"))
     max_bytes: Mapped[int] = mapped_column(BigInteger, default=8 * 1024 ** 3,
                                            server_default=text(str(8 * 1024 ** 3)))
 

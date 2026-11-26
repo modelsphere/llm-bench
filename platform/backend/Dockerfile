@@ -36,17 +36,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # final BFCL environment, source-package builds, and CLI checks run offline.
 FROM python:3.12-slim AS bfcl-builder
 ARG TARGETARCH
+# Install git/ca-certificates before COPY and BFCL_PIP_INDEX_URL so mirror or
+# lock changes reuse the apt layer.
+RUN mkdir -p /opt/bfcl \
+    && if [ "$TARGETARCH" = amd64 ]; then \
+      apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 ARG BFCL_PIP_INDEX_URL=https://pypi.org/simple
 ARG BFCL_PIP_TIMEOUT=120
 ENV PIP_INDEX_URL=${BFCL_PIP_INDEX_URL} PIP_DEFAULT_TIMEOUT=${BFCL_PIP_TIMEOUT}
 COPY bench/bfcl/requirements.lock /tmp/bfcl-requirements.lock
 # The BFCL lock covers the x86_64 CPU workers. Keep the existing arm64
 # backend release usable for all other modules.
-RUN mkdir -p /opt/bfcl \
-    && if [ "$TARGETARCH" = amd64 ]; then \
-      apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
-      && rm -rf /var/lib/apt/lists/* \
-      && grep -E '^(setuptools|wheel|packaging)==' /tmp/bfcl-requirements.lock \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$TARGETARCH" = amd64 ]; then \
+      grep -E '^(setuptools|wheel|packaging)==' /tmp/bfcl-requirements.lock \
            > /tmp/bfcl-bootstrap.lock \
       && python -m pip install --require-hashes --no-deps -r /tmp/bfcl-bootstrap.lock \
       && python -m pip download --require-hashes --only-binary=:all: \

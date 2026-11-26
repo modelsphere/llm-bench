@@ -392,6 +392,11 @@ async def handle_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_flush_cache(request: web.Request) -> web.Response:
+    """SGLang's prefix-cache flush; a timed replay calls it before it starts."""
+    return web.json_response({"status": "ok"})
+
+
 async def handle_models(request: web.Request) -> web.Response:
     return web.json_response({
         "object": "list",
@@ -502,6 +507,7 @@ def build_app(cfg: argparse.Namespace) -> web.Application:
     app = web.Application()
     app["cfg"] = cfg  # pass config via app context instead of global
     app.router.add_get("/health", handle_health)
+    app.router.add_post("/flush_cache", handle_flush_cache)
     app.router.add_get("/v1/models", handle_models)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_post("/v1/completions", handle_completions)

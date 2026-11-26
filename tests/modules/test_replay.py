@@ -725,3 +725,96 @@ def test_run_concurrent_covers_every_record_in_order(tmp_path, monkeypatch):
     assert all(r.get("success") for r in results), "every record should be dispatched"
     # results is indexed by position — the contract _aggregate relies on.
     assert [r["request_id"] for r in results] == [f"r{i}" for i in range(25)]
+
+
+# -- fixed output lengths and the figures about the run itself -----------------
+
+from bench.replay_test.log_replay_tool import recorded_completion_tokens  # noqa: E402
+from bench.tests.functional.replay import (  # noqa: E402
+    output_length_metrics,
+    recorded_length_factor,
+    throughput_resample,
+)
+
+
+def _recorded(body: dict, completion_tokens) -> MatchedRequest:
+    rec = _record(body)
+    rec.raw_payload = {"resp_meta": {"usage": {"completion_tokens": completion_tokens}}}
+    return rec
+
+
+def test_recorded_completion_tokens_read_from_the_capture():
+    assert recorded_completion_tokens(_recorded({}, 812)) == 812
+    assert recorded_completion_tokens(_recorded({}, "40")) == 40
+    assert recorded_completion_tokens(_recorded({}, 0)) is None
+    assert recorded_completion_tokens(_record({})) is None
+
+
+def test_recorded_completion_tokens_from_a_lean_record():
+    # Lean loads (what the runner uses) drop raw_payload and keep the usage
+    # block as recorded_usage.
+    rec = _record({})
+    rec.recorded_usage = {"completion_tokens": 321}
+    assert recorded_completion_tokens(rec) == 321
+
+
+def test_fixed_output_length_forces_the_recorded_length():
+    rec = _recorded({"messages": [], "max_completion_tokens": 9000, "stop": ["</x>"], "stop_token_ids": [7]}, 812)
+    body = json.loads(build_replay_body(rec, "m", fixed_output_tokens=812))
+    assert body["max_tokens"] == 812 and body["min_tokens"] == 812 and body["ignore_eos"] is True
+    assert "stop" not in body and "stop_token_ids" not in body and "max_completion_tokens" not in body
+    # The generation cap still holds.
+    capped = json.loads(build_replay_body(rec, "m", max_generation_tokens=500, fixed_output_tokens=812))
+    assert capped["max_tokens"] == 500 and capped["min_tokens"] == 500
+    # Off: the request is as recorded.
+    plain = json.loads(build_replay_body(rec, "m"))
+    assert plain["stop"] == ["</x>"] and "ignore_eos" not in plain
+
+
+def test_fixed_output_lengths_param_and_metrics_registered():
+    cls = get_module("replay")
+    assert cls.descriptor()["params_schema"]["properties"]["fixed_output_lengths"]["default"] is False
+    names = {m["name"] for m in cls.descriptor()["metrics"]} if "metrics" in cls.descriptor() else None
+    if names is not None:
+        for n in ("throughput_resample_p05_change_pct", "throughput_resample_p95_change_pct",
+                  "recorded_length_score_factor", "output_length_match_rate"):
+            assert n in names
+
+
+def _ok(prompt, out, ttft, total, recorded=None):
+    return {"prompt_tokens": prompt, "completion_tokens": out, "ttft_ms": ttft,
+            "total_ms": total, "recorded_completion_tokens": recorded, "success": True}
+
+
+def test_throughput_resample_brackets_the_run_and_is_repeatable():
+    rows = [_ok(1000, 100 + 37 * (i % 11), 200.0, 200.0 + 10.0 * (100 + 37 * (i % 11))) for i in range(200)]
+    a = throughput_resample(rows, seed=1)
+    assert a == throughput_resample(rows, seed=1)
+    assert a["throughput_resample_requests"] == 200
+    assert a["throughput_resample_p05_change_pct"] < 0 < a["throughput_resample_p95_change_pct"]
+    # Identical requests: no range at all.
+    same = throughput_resample([_ok(1000, 300, 200.0, 3200.0)] * 50)
+    assert same["throughput_resample_p05_change_pct"] == 0 == same["throughput_resample_p95_change_pct"]
+    # Too few to say.
+    assert throughput_resample(rows[:5])["throughput_resample_p05_change_pct"] is None
+
+
+def test_recorded_length_factor_swaps_the_lengths():
+    # 10 ms per output token after a 100 ms first token; production answered
+    # twice as long. Tokens per ms: (1000+200)/(100+1990) measured,
+    # (1000+400)/(100+3990) at recorded lengths.
+    rows = [_ok(1000, 200, 100.0, 100.0 + 10.0 * 199, recorded=400)] * 10
+    f = recorded_length_factor(rows)
+    assert f["recorded_length_requests"] == 10
+    assert abs(f["recorded_length_score_factor"] - (1400 / 4090) / (1200 / 2090)) < 1e-4
+    # Already at the recorded lengths: factor 1.
+    assert recorded_length_factor([_ok(1000, 400, 100.0, 4090.0, recorded=400)])["recorded_length_score_factor"] == 1.0
+    assert recorded_length_factor([_ok(1000, 400, 100.0, 4090.0)])["recorded_length_score_factor"] is None
+
+
+def test_output_length_metrics():
+    rows = [_ok(10, 400, 1.0, 2.0, recorded=400), _ok(10, 399, 1.0, 2.0, recorded=400), _ok(10, 100, 1.0, 2.0, recorded=400), _ok(10, 50, 1.0, 2.0)]
+    m = output_length_metrics(rows, True)
+    assert m["fixed_output_lengths"] == 1 and m["requests_with_recorded_length"] == 3
+    assert abs(m["output_length_match_rate"] - 2 / 3) < 1e-9
+    assert abs(m["output_tokens_vs_recorded_ratio"] - 899 / 1200) < 1e-9

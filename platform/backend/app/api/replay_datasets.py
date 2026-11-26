@@ -79,7 +79,7 @@ _PROFILE_FIELDS = (
     "forwarded_to", "uris", "exclude_truncated", "extra_logsql", "window_hours",
     "window_timezone", "subwindow_minutes", "sample_size", "oversample_factor",
     "max_carry_multiple", "max_bytes", "clean", "max_model_len", "keep_response_body",
-    "compress", "header_denylist",
+    "compress", "header_denylist", "layout", "session_field", "max_idle_gap_s",
     "min_records", "min_buckets", "schedule_interval_hours", "schedule_anchor_hour",
     "max_age_hours", "keep_builds", "min_retain_hours",
 )
@@ -266,6 +266,8 @@ def _current_build(profile: ReplayDatasetProfile) -> CurrentBuild | None:
         window_end=build.window_end,
         buckets=stats.get("buckets") if isinstance(stats.get("buckets"), dict) else None,
         summary=stats.get("summary") if isinstance(stats.get("summary"), dict) else None,
+        load=stats.get("load") if isinstance(stats.get("load"), dict) else None,
+        timed=stats.get("timed") if isinstance(stats.get("timed"), dict) else None,
     )
 
 

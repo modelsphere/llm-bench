@@ -259,7 +259,13 @@ def test_build_publishes_a_replayable_dataset(tmp_path):
 
     assert result.status == "ready", result.error
     assert result.build.records == 6                     # sample_size
-    assert len(client.queries) == 3                      # one per sub-window
+    sample_queries = [q for q in client.queries if "| fields " not in q]
+    assert len(sample_queries) == 3                      # one per sub-window
+    # Plus one fields-only query for the load reading, over the week before the
+    # window's end, truncated captures included.
+    (load_query,) = [q for q in client.queries if "| fields " in q]
+    assert "req_body_truncated" not in load_query
+    assert result.build.stats["load"]["window_hours"] == 168
     resolved = dataset_feed.resolve_latest(tmp_path, "daily")
     assert resolved is not None and resolved.build_id == result.build.build_id
 

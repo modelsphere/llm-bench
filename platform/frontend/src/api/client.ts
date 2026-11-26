@@ -383,6 +383,72 @@ export interface ReplayDatasetCurrent {
     total_cached_tokens?: number
     cache_hit_rate?: number | null
   } | null
+  // How loaded the backend was over the week before the build, read from the
+  // gateway logs alone (app.datasets.load_profile). Absent on older builds.
+  load?: LoadReading | null
+  // Timed layout only: the window kept whole, and how it replays.
+  timed?: {
+    requests: number
+    sessions: number
+    turns_p50: number
+    turns_p90: number
+    following_share: number
+    window_s: number
+    replay_s: number
+    removed_s: number
+    gaps: number
+    window_start: string
+    window_end: string
+    c_req_median: number
+    c_target: number
+    missing_share: number
+    session_source: Record<string, number>
+  } | null
+}
+
+export interface LoadReadingGroup {
+  group: number                 // concurrency level: C_req rounded
+  requests: number
+  c_mean: number
+  share_from: number            // share of requests in this group and above
+  slowdown: number              // the same request, relative to group 1
+  raw_slowdown: number          // median latency, uncorrected for request mix
+  e_into: number | null         // share of the extra load that became throughput
+  latency_median_s: number
+  prompt_mean: number
+  output_mean: number
+  cached_share: number | null
+}
+
+export interface LoadReading {
+  version: number
+  status: 'ok' | 'unclear' | 'too_little_traffic' | 'no_traffic' | 'failed'
+  category: 'idle' | 'moderate' | 'busy' | 'unclear'
+  fitted_category?: 'idle' | 'moderate' | 'busy'
+  knee_group?: number | null
+  w_log?: number
+  crossings?: number
+  requests?: number
+  rows?: number
+  c_typ?: number
+  c_peak?: number
+  c_req_max?: number
+  overlapped_share?: number
+  window_start?: string
+  window_end?: string
+  window_hours?: number
+  groups?: LoadReadingGroup[]
+  thresholds?: { idle_below: number; busy_from: number; min_group: number }
+  fit?: {
+    r2_log: number | null
+    residual_by_utc_block: Record<string, number>
+    size_coefficients_s: Record<string, number>
+    halves: Record<string, { knee_group: number | null; w_log: number; category: string } | null>
+    checks: Record<string, boolean | null>
+    hard_checks?: string[]
+  }
+  note?: string
+  error?: string
 }
 
 export interface ReplayDatasetBuild {
@@ -422,6 +488,9 @@ export interface ReplayDatasetProfile {
   exclude_truncated: boolean
   extra_logsql?: string | null
   window_hours: number
+  layout?: "sampled" | "timed"
+  session_field?: string
+  max_idle_gap_s?: number
   window_timezone: string
   subwindow_minutes: number
   sample_size: number

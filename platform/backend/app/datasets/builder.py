@@ -25,13 +25,16 @@ itself (see `docs/platform-architecture.md` §8):
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import os
 import random
 import shutil
+import time
+import zlib
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator
@@ -48,6 +51,7 @@ from bench.replay_test.bodylog_convert import (
 )
 from bench.replay_test.log_replay_tool import load_extract_jsonl, percentile
 
+from app.datasets import load_profile, timed
 from app.datasets.sources import LogSource, as_source
 from app.datasets.victorialogs import LogFilters
 
@@ -67,6 +71,23 @@ DISK_HEADROOM_MULTIPLE = 2.0
 # Fallback average record size (bytes) for the pre-flight disk estimate, before
 # any real record has been seen. Measured on live traffic: ~60KB-180KB.
 ESTIMATED_RECORD_BYTES = 120_000
+# A timed window's records are read in pieces this long. The store answers one
+# query for at most its own time limit (VictoriaLogs' -search.maxQueryDuration,
+# 30 s by default) and then cuts the stream mid-row: a quarter of an hour of
+# agent traffic (hundreds of KB per request) does not fit in one query.
+TIMED_FETCH_SECONDS = 30
+# A timed build missing more of its window than this is not published: the
+# replay would apply a fraction of production's load.
+TIMED_MAX_MISSING_SHARE = 0.25
+
+
+def time_pieces(start: datetime, end: datetime, seconds: float) -> list[tuple[datetime, datetime]]:
+    """[start, end) cut into consecutive half-open pieces of `seconds`."""
+    out, step = [], timedelta(seconds=max(1.0, seconds))
+    while start < end:
+        out.append((start, min(start + step, end)))
+        start += step
+    return out
 
 ProgressFn = Callable[[str], None]
 StopFn = Callable[[], bool]
@@ -111,6 +132,23 @@ class BuildProfile:
     # Only used to project how many builds retention will really hold
     # (see `retained_builds`); the schedule itself is the collector's job.
     schedule_interval_hours: float = 24.0
+    # The load reading (idle / moderate / busy, see app.datasets.load_profile)
+    # stored with every build: computed over this many hours ending where the
+    # build's window ends. 0 turns it off. On a source that cannot read timing
+    # without whole records (bodylog files) it is capped at window_hours.
+    load_window_hours: int = 168
+    load_min_group: int = load_profile.MIN_GROUP
+    # "sampled" (the default): single requests spread over the window.
+    # "timed": every request of one contiguous window, in time order, with
+    # each one's send time and session (app.datasets.timed), for a replay on
+    # the recorded timing. sample_size is then the window's request count.
+    layout: str = "sampled"
+    # Where a request's session id is, as a dotted field of the log record
+    # (e.g. a request header: "req_headers.x-session-id"). Empty: sessions are
+    # rebuilt from message prefixes.
+    session_field: str = ""
+    # Timed layout: an idle stretch longer than this is shortened to it.
+    max_idle_gap_s: float = 5.0
 
     def tzinfo(self):
         try:
@@ -361,6 +399,9 @@ def build_dataset(
     strip = profile.strip_policy()
     written = 0
     carry = 0
+    load: "dict | None" = None
+    timed_summary: "dict | None" = None
+    is_timed = profile.layout == "timed"
 
     projected = retained_builds(profile, profile.schedule_interval_hours)
     per_slice_cap = base_quota * max(1, profile.max_carry_multiple)
@@ -395,7 +436,22 @@ def build_dataset(
         # compresses. It also errs high for the disk precondition, which is the
         # safe direction.
         with jsonl_io.open_text(staged, "w") as out:
-            for index, (slice_start, slice_end) in enumerate(slices):
+            if is_timed:
+                load = measure_load(source, profile, end, say=say, should_stop=stop)
+                c_target = (load or {}).get("c_typ") if (load or {}).get("status") in ("ok", "unclear") else None
+                lines, timed_summary = _collect_timed(
+                    source, profile, start, end, c_target, strip=strip, stats=stats,
+                    fetch_stats=fetch_stats, say=say, stop=stop, build_id=build_id)
+                for line, facts in lines:
+                    payload = line + "\n"
+                    encoded = payload.encode("utf-8")
+                    out.write(payload)
+                    digest.update(encoded)
+                    raw_bytes += len(encoded)
+                    stats.note_written(facts[2])
+                    summary.add(facts)
+                    written += 1
+            for index, (slice_start, slice_end) in enumerate([] if is_timed else slices):
                 if stop():
                     raise BuildAborted("stopped before completion")
                 if written >= profile.sample_size:
@@ -465,6 +521,8 @@ def build_dataset(
             os.fsync(out.fileno())
 
         _validate(staged, profile, stats, written)
+        if not is_timed:
+            load = measure_load(source, profile, end, say=say, should_stop=stop)
 
         build = dataset_feed.publish(
             feed_root, profile.name, staged,
@@ -475,7 +533,9 @@ def build_dataset(
             window_start=start,
             window_end=end,
             stats={**stats.as_dict(), **dict(fetch_stats),
-                   "summary": summary.as_dict(), "seed": seed},
+                   "summary": summary.as_dict(), "seed": seed,
+                   **({"load": load} if load else {}),
+                   **({"timed": timed_summary} if timed_summary else {})},
         )
     except BuildAborted as exc:
         _discard(staged)
@@ -505,9 +565,186 @@ def build_dataset(
     )
     return BuildResult(
         status="ready", build=build,
-        stats={**stats.as_dict(), **dict(fetch_stats), "summary": summary.as_dict()},
+        stats={**stats.as_dict(), **dict(fetch_stats), "summary": summary.as_dict(),
+               **({"load": load} if load else {}),
+               **({"timed": timed_summary} if timed_summary else {})},
         pruned=pruned, window_start=start, window_end=end, seed=seed,
     )
+
+
+def _collect_timed(
+    source: "LogSource",
+    profile: BuildProfile,
+    start: datetime,
+    end: datetime,
+    c_target: "float | None",
+    *,
+    strip: StripPolicy,
+    stats: ConvertStats,
+    fetch_stats: Counter,
+    say: ProgressFn,
+    stop: StopFn,
+    build_id: str,
+) -> "tuple[list[tuple[str, tuple]], dict]":
+    """Every request of one window, linked into sessions, gaps removed: the
+    lines of a timed dataset, in time order, and its summary."""
+    # 1. Timing of every request in the profile's window, to choose from.
+    spans: list[tuple[float, float]] = []
+    longest = 0.0
+    for row in source.iter_timing(replace(profile.filters, exclude_truncated=False), start, end):
+        if stop():
+            raise BuildAborted("stopped while reading timing")
+        q = load_profile.request_of(row)
+        if q is None:
+            ts, rt = load_profile._ts(row.get("ts")), load_profile._num(row.get("rt"))
+            if ts is None or rt is None or rt <= 0:
+                continue
+            q = (ts, rt)
+        spans.append((q[0], q[0] + q[1]))
+        longest = max(longest, q[1])
+    if not spans:
+        raise RuntimeError("no request with timing in the window: nothing to build a timed dataset from")
+    win = timed.choose_window(spans, max(1, profile.sample_size), c_target)
+    w_start = datetime.fromtimestamp(win["start"], timezone.utc)
+    w_end = datetime.fromtimestamp(win["end"], timezone.utc)
+    say(f"timed: window {w_start.isoformat()} → {w_end.isoformat()}, {win['requests']} requests, "
+        f"median in flight {win['c_req_median']:.2f} (typical {win['c_target']:.2f})")
+
+    # 2. Their records. The store may time a record by its end, so read a
+    # little around the window and keep what STARTED inside it.
+    # Only as far as the window's own longest request: the longest of the
+    # whole day (a stuck request of 40 minutes) would read that much more.
+    longest_in = max((e - s for s, e in spans if win["start"] <= s < win["end"]), default=longest)
+    pad_after = timedelta(seconds=min(3600.0, longest_in + 5))
+    rows: list[timed.Row] = []
+    dropped: Counter = Counter()
+    placeholders_before = stats.fixes["image_placeholder"]
+    def window_rows():
+        for piece_start, piece_end in time_pieces(w_start - timedelta(seconds=60), w_end + pad_after,
+                                                  TIMED_FETCH_SECONDS):
+            yield from source.iter_window(profile.filters, piece_start, piece_end)
+
+    for row in window_rows():
+        if stop():
+            raise BuildAborted("stopped while fetching the window")
+        fetch_stats["fetched"] += 1
+        t0, rt = load_profile._ts(row.get("ts")), load_profile._num(row.get("rt"))
+        if t0 is None or rt is None or rt <= 0 or not (win["start"] <= t0 < win["end"]):
+            fetch_stats["outside_window"] += 1
+            continue
+        stats.total += 1
+        sid = load_profile._get(row, profile.session_field) if profile.session_field else None
+        record, reason = convert_record(
+            row, source_file=f"{profile.name}:{build_id}", line_no=stats.total, clean=profile.clean,
+            budget=profile.budget, strip=strip, fixes=stats.fixes,
+            # Keep the request whatever its images: a missing request is
+            # missing load (see bodylog_convert.PLACEHOLDER_IMAGE_URI).
+            bad_images="placeholder")
+        if record is None:
+            stats.drops[reason] += 1
+            dropped[reason] += 1
+            continue
+        body = record.get("request_json")
+        if not isinstance(body, dict):
+            try:
+                body = json.loads(record.get("request_body") or "")
+            except ValueError:
+                body = {}
+        messages = body.get("messages") if isinstance(body, dict) else None
+        # Kept small: the hashes linking needs, not the messages, and the
+        # record as a compressed line. A quarter hour of agent traffic is
+        # gigabytes as parsed records (it ran the builder out of memory).
+        rows.append(timed.Row(
+            start=t0, rt=rt, session=str(sid or ""),
+            hashes=timed.message_hashes(messages if isinstance(messages, list) else None),
+            payload=(zlib.compress(dumps_record(record).encode("utf-8"), 6), _record_facts(record))))
+        del record, body, messages
+    if not rows:
+        raise RuntimeError("the chosen window has no replayable request")
+    if win["requests"] and 1 - len(rows) / win["requests"] > TIMED_MAX_MISSING_SHARE:
+        raise RuntimeError(
+            f"only {len(rows)} of the window's {win['requests']} requests could be read "
+            f"({fetch_stats['fetched']} rows fetched, dropped {dict(dropped)}): a replay of it would "
+            "apply a fraction of production's load — keeping the previous build")
+
+    # 3. Sessions, idle gaps, lines.
+    sources = timed.link_sessions(rows)
+    gaps = timed.remove_gaps(rows, max(0.0, profile.max_idle_gap_s))
+    def lines():
+        # One record expanded at a time, its timing added.
+        for r in rows:
+            record = json.loads(zlib.decompress(r.payload[0]))
+            record["timing"] = r.timing
+            yield dumps_record(record), r.payload[1]
+    out = timed.summarize(rows, sources, gaps)
+    out.update(window_start=w_start.isoformat(), window_end=w_end.isoformat(),
+               requests_in_window=win["requests"], c_req_median=win["c_req_median"],
+               c_target=win["c_target"], max_idle_gap_s=profile.max_idle_gap_s,
+               session_field=profile.session_field,
+               # Requests in the window that are not in the file (unreplayable
+               # bodies, truncated captures): load the replay will not apply.
+               missing_share=max(0.0, 1 - len(rows) / win["requests"]) if win["requests"] else 0.0,
+               # Why: dropped while converting (by reason), or never returned by
+               # the profile's filters (a truncated capture, another status).
+               placeholder_images=stats.fixes["image_placeholder"] - placeholders_before,
+               missing={**dict(dropped),
+                        "not_fetched": max(0, win["requests"] - len(rows) - sum(dropped.values()))})
+    say(f"timed: {out['requests']} requests in {out['sessions']} sessions, "
+        f"{out['following_share']:.0%} follow an earlier turn; {out['window_s']:.0f}s of traffic "
+        f"replays in {out['replay_s']:.0f}s")
+    return lines(), out
+
+
+def measure_load(
+    source: "LogSource",
+    profile: BuildProfile,
+    end: datetime,
+    *,
+    say: "ProgressFn | None" = None,
+    should_stop: "StopFn | None" = None,
+) -> "dict | None":
+    """The load reading of the profile's backend over the hours before `end`.
+
+    Never fails a build: an error comes back as `{"status": "failed", ...}` and
+    the dataset is published without a reading. Reads every request in the
+    window, timing and token counts only. Truncated captures count too: their
+    bodies are unusable for replay, but the backend served them all the same.
+    """
+    say = say or (lambda _msg: None)
+    stop = should_stop or (lambda: False)
+    hours = max(0, int(profile.load_window_hours))
+    source = as_source(source)
+    if not getattr(source, "timing_is_cheap", False):
+        hours = min(hours, max(1, profile.window_hours))
+    if hours <= 0:
+        return None
+    start = end - timedelta(hours=hours)
+    filters = replace(profile.filters, exclude_truncated=False)
+    began = time.monotonic()
+    try:
+        reqs, rows = [], 0
+        for row in source.iter_timing(filters, start, end):
+            rows += 1
+            if rows % 50_000 == 0:
+                if stop():
+                    raise BuildAborted("stopped while reading the load window")
+                say(f"load reading: {rows} requests read")
+            q = load_profile.request_of(row)
+            if q is not None:
+                reqs.append(q)
+        reading = load_profile.analyse(reqs, min_group=max(1, profile.load_min_group))
+    except BuildAborted:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a reading is optional, the build is not
+        logger.exception("[feed:%s] load reading failed", profile.name)
+        return {"version": load_profile.VERSION, "status": "failed", "category": "unclear",
+                "error": f"{type(exc).__name__}: {exc}",
+                "window_start": start.isoformat(), "window_end": end.isoformat()}
+    reading.update(window_start=start.isoformat(), window_end=end.isoformat(),
+                   window_hours=hours, rows=rows, seconds=round(time.monotonic() - began, 1))
+    say(f"load reading: {reading['category']} (w_log {reading.get('w_log', 0):.2f}, "
+        f"knee group {reading.get('knee_group')}) from {len(reqs)} requests over {hours}h")
+    return reading
 
 
 def retained_builds(profile: BuildProfile, schedule_interval_hours: float) -> int:

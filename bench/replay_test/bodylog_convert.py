@@ -277,6 +277,26 @@ def bucket_for_tokens(pt: object) -> "str | None":
     return None
 
 
+def _placeholder_png(side: int = 64) -> str:
+    """A valid side×side mid-grey PNG as a data: URI."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + b"\x80" * side for _ in range(side))       # filter 0, grey pixels
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 0, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+# Stands in for an image whose logged data cannot be decoded (cut short by the
+# capture), where dropping the request is worse than changing the image: a
+# timed dataset must keep every request to keep production's load.
+PLACEHOLDER_IMAGE_URI = _placeholder_png()
+
+
 def _data_uri_image_ok(url: str) -> bool:
     """True if a data: URI declares image/* AND its payload starts with a known
     image magic. Anything else fails server-side decode."""
@@ -323,8 +343,11 @@ def _clean_tools(tools: object, fixes: Counter) -> None:
             fixes["tool_schema_fixed"] += 1
 
 
-def _clean_messages(messages: list, fixes: Counter) -> "str | None":
-    """Repair message content in place. Returns a drop reason, or None to keep."""
+def _clean_messages(messages: list, fixes: Counter, bad_images: str = "drop") -> "str | None":
+    """Repair message content in place. Returns a drop reason, or None to keep.
+
+    bad_images: "drop" drops a request with an undecodable image;
+    "placeholder" puts PLACEHOLDER_IMAGE_URI in its place."""
     for m in messages:
         if not isinstance(m, dict):
             return "malformed_message"
@@ -346,7 +369,10 @@ def _clean_messages(messages: list, fixes: Counter) -> "str | None":
                     return "malformed_content_part"
                 if url.startswith("data:"):
                     if not _data_uri_image_ok(url):
-                        return "bad_image_data_uri"
+                        if bad_images != "placeholder":
+                            return "bad_image_data_uri"
+                        part["image_url"] = {**(part.get("image_url") or {}), "url": PLACEHOLDER_IMAGE_URI}
+                        fixes["image_placeholder"] += 1
                 else:
                     # http(s)/file/… — the target would have to fetch it.
                     return "external_image_url"
@@ -364,6 +390,7 @@ def clean_request_json(
     body_utf8_len: int,
     budget: int,
     fixes: Counter,
+    bad_images: str = "drop",
 ) -> "str | None":
     """Apply --clean repairs to `request_json` in place.
 
@@ -371,7 +398,7 @@ def clean_request_json(
     (the record cannot be made replayable), or None if it was kept. Mutations
     are tallied into `fixes` (the caller re-serializes when any fix landed).
     """
-    reason = _clean_messages(request_json.get("messages") or [], fixes)
+    reason = _clean_messages(request_json.get("messages") or [], fixes, bad_images)
     if reason:
         return reason
     _clean_tools(request_json.get("tools"), fixes)
@@ -438,6 +465,7 @@ def convert_record(
     budget: int = 0,
     strip: "StripPolicy | None" = None,
     fixes: "Counter | None" = None,
+    bad_images: str = "drop",
 ) -> "tuple[dict | None, str | None]":
     """Convert ONE bodylog capture (nested — call `unflatten` first for a
     VictoriaLogs row) into a MatchedRequest dict.
@@ -486,7 +514,7 @@ def convert_record(
             return None, "orig_4xx"
         pre_fix = sum(fixes.values())
         reason = clean_request_json(
-            request_json, prompt_tokens, len(req_body.encode("utf-8")), budget, fixes,
+            request_json, prompt_tokens, len(req_body.encode("utf-8")), budget, fixes, bad_images,
         )
         if reason:
             return None, reason

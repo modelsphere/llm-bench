@@ -76,6 +76,12 @@ class ProfileBase(ProfileSource):
 
     # window + sampling
     window_hours: int = Field(default=24, ge=1, le=24 * 30)
+    # sampled: single requests spread over the window (the default). timed:
+    # every request of one contiguous window of sample_size requests, in time
+    # order, with send times and sessions, for a replay on recorded timing.
+    layout: Literal["sampled", "timed"] = "sampled"
+    session_field: str = Field(default="", max_length=200)
+    max_idle_gap_s: float = Field(default=5.0, ge=0.0, le=3600.0)
     window_timezone: str = Field(default="UTC", max_length=64)
     subwindow_minutes: int = Field(default=60, ge=1, le=24 * 60)
     sample_size: int = Field(default=2000, ge=1, le=1_000_000)
@@ -148,6 +154,9 @@ class ProfileUpdate(BaseModel):
     exclude_truncated: bool | None = None
     extra_logsql: str | None = Field(default=None, max_length=2000)
     window_hours: int | None = Field(default=None, ge=1, le=24 * 30)
+    layout: Literal["sampled", "timed"] | None = None
+    session_field: str | None = Field(default=None, max_length=200)
+    max_idle_gap_s: float | None = Field(default=None, ge=0.0, le=3600.0)
     window_timezone: str | None = Field(default=None, max_length=64)
     subwindow_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
     sample_size: int | None = Field(default=None, ge=1, le=1_000_000)
@@ -216,6 +225,14 @@ class CurrentBuild(BaseModel):
     # nothing has to re-read a multi-hundred-MB dataset to answer "what is
     # this?". None for builds made before it was recorded.
     summary: dict | None = None
+    # How loaded the backend was over the week before the build: idle /
+    # moderate / busy / unclear, with the slowdown per concurrency group it was
+    # read from (app.datasets.load_profile). None for builds made before it was
+    # recorded or with the reading turned off.
+    load: dict | None = None
+    # Timed layout only: the window kept whole and how it replays (requests,
+    # sessions, real vs replayed seconds; app.datasets.timed.summarize).
+    timed: dict | None = None
 
 
 class ProfileResponse(ProfileBase):
