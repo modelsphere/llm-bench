@@ -285,6 +285,106 @@ It identifies the dataset; it is not an enforced integrity check. Resolution
 verifies file *size*, because re-hashing hundreds of MB before every run is not
 worth it.
 
+### Load reading
+
+`current.load` says how loaded the profile's backend was over the week before
+the build: **idle**, **moderate**, **busy**, or **unclear**. It is read from the
+logs alone, before any benchmark, so it can decide what a tuning run should
+measure (latency on a quiet backend, throughput on a busy one).
+
+How it is read:
+
+1. For every request in the week, the number of requests in flight while it
+   ran, averaged over its lifetime. Requests are grouped on the nearest of the
+   levels 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, … (unit steps at the
+   bottom, then 20–33 % apart, so each step changes the load enough to be read
+   through the noise); the sparse top (levels with fewer than 300 requests) is
+   folded into the highest level that has 300.
+2. Busier moments do not carry the same requests as quiet ones, so raw latency
+   would mix up "bigger requests" with "busier engine". Each request's latency
+   is modelled as `slowdown(group) × size(request)`, with
+   `size = a + b·uncached prompt + c·cached prompt + d·output tokens`, and both
+   are fitted together over every request. `slowdown` is 1 for the least
+   loaded group.
+3. Between neighbouring groups, `e = 1 − ln(S₂/S₁) / ln(C₂/C₁)`: by Little's
+   law, the share of the extra concurrency that became throughput. The
+   **knee** is the first group where `e` falls below 0.5.
+4. `w_log` is the share of requests in the knee group and above: below 0.10
+   is idle, 0.50 and above is busy, moderate in between.
+
+The fit is checked before it is believed. Two checks withhold the category
+when they fail, which makes it `unclear` (`fitted_category` keeps what it would
+have said): R² on log latency of at least 0.5, and the even-day and odd-day
+halves of the week giving `w_log` at most 0.15 apart. Two more are shown as
+notes: a leftover pattern by 6-hour block of the day (median residual beyond
+±10 %), and a curve that crosses the knee more than once. A backend where
+almost nothing ran concurrently (fewer than 10 % of requests with two or more
+in flight) is idle without a curve.
+
+```json
+"load": {
+  "status": "ok", "category": "moderate", "knee_group": 4, "w_log": 0.217,
+  "requests": 203446, "c_typ": 2.0, "c_peak": 2.83, "window_hours": 168,
+  "groups": [
+    {"group": 1, "requests": 62502, "slowdown": 1.0, "raw_slowdown": 1.0, "e_into": null, "...": "..."},
+    {"group": 4, "requests": 19124, "slowdown": 1.53, "raw_slowdown": 1.58, "e_into": 0.45, "...": "..."}
+  ],
+  "fit": {"r2_log": 0.85, "checks": {"r2": true, "no_drift_by_time_of_day": true,
+                                     "halves_agree": true, "single_crossing": true},
+          "hard_checks": ["r2", "halves_agree"], "...": "..."}
+}
+```
+
+It costs one fields-only query over the week (timing and token counts, no
+bodies) per build. A failed reading never fails the build; it is stored as
+`{"status": "failed", "error": ...}`. On the `bodylog_files` source, which has
+to parse whole records, the reading covers the build's own window instead of a
+week. Builds made before the reading existed have no `load`.
+
+### Timed datasets (`layout: timed`)
+
+A profile with `"layout": "timed"` builds a different kind of dataset: instead
+of single requests spread over the window, **every** request of one contiguous
+stretch of it, in time order, so a replay can send them as production did and
+the engine sees production's own load.
+
+- **Which stretch.** The builder reads the timing of every request in the
+  profile's window (no bodies) and takes the run of `sample_size` consecutive
+  requests whose median concurrency is closest to the backend's typical value
+  (the load reading's `c_typ`), so the replay shows typical load, not a quiet
+  night. A window with fewer requests is taken whole.
+- **Sessions.** `session_field` names where the logs keep a session id, as a
+  dotted field of the record (a request header, for instance
+  `req_headers.x-session-id`). Without one, a request whose messages continue
+  an earlier request's messages (that request's messages plus the answer, tool
+  results and the next question) joins its session.
+- **Idle gaps.** A stretch with nothing in flight longer than `max_idle_gap_s`
+  (default 5) is shortened to it. Nothing runs during it, so no request's
+  conditions change, and a quiet hour replays in minutes.
+
+Each record carries a `timing` block:
+
+```json
+"timing": {"at_s": 41.207, "session": "c1f…", "turn": 3, "after": 17,
+           "think_s": 2.4, "rt_s": 3.91, "ts": "2026-11-12T03:14:15.926+00:00"}
+```
+
+`at_s` is when to send it, from the start of the replay; `after` is the line
+(0-based) of the earlier turn of its session it follows, and `think_s` how
+long after that turn ended it is sent, on the replay's timeline: idle gaps are
+shortened there as in `at_s`, or every cut stretch between two turns would come
+back when the replay waits for it. `think_s_logged` is production's own value
+(both null when the earlier turns were still running). A request whose logged image cannot be decoded (the capture cut its data
+short) is kept with a small placeholder image in its place, because a missing
+request is missing load; the sampled layout drops it as before.
+`placeholder_images` counts them: such a request still arrives on time and in
+its session, but its prefill is lighter than production's.
+
+`current.timed` summarizes the build: requests, sessions,
+`following_share`, `window_s` of traffic against `replay_s` of replay, the
+window chosen, and `missing_share`, the requests of the window that are not in
+the file (unreplayable bodies, truncated captures).
+
 ## 6. Point a benchmark at the profile
 
 Set the replay module's params in the benchmark (admin API or the editor):
@@ -308,6 +408,103 @@ Set the replay module's params in the benchmark (admin API or the editor):
   not exist.
 - The profile must have published **at least one build** before a submission
   runs, or the run fails with "has no published build to replay".
+
+### Timed replay (`schedule: timed`)
+
+A timed dataset is replayed with `"schedule": "timed"` instead of
+`concurrency`:
+
+```json
+{ "module_name": "replay",
+  "params_json": {
+    "dataset_source": "auto",
+    "dataset_profile": "glm5-timed",
+    "schedule": "timed",
+    "warmup_s": 30
+  } }
+```
+
+- **When each request goes out.** A request that follows no earlier turn is
+  sent at its `at_s`. A later turn of a session is sent `think_s` after the
+  turn it follows finishes **on the engine under test**: a faster engine
+  brings the next turn sooner, as it would in production, and a slower one
+  delays it. There is no client concurrency limit; the engine sees the
+  load the schedule makes.
+- **Latency** is measured from each request's due time, not from when the
+  client sent it, so a client that falls behind cannot hide it.
+  `schedule_lag_p99_s` is how late requests went out; above `max_lag_s`
+  (default 2 s) the run is marked `fell_behind` and fails its redline.
+- **Before the run** the engine's prefix cache is flushed (SGLang
+  `/flush_cache`, vLLM `/reset_prefix_cache`; `cache_flushed` says whether one
+  answered), and requests due in the first `warmup_s` seconds are sent but not
+  measured, so every config starts from the same state.
+- **Safety cap.** At most `max_in_flight` (default 512) requests are open at
+  once; past it, requests wait (the wait counts as latency) and
+  `max_in_flight_hit` is set.
+
+Metrics, over the measured requests: `e2e_p50_ms` / `e2e_p90_ms` /
+`e2e_mean_ms` (due time to last token), `ttft_*` (from the due time too),
+`tpot_p50_ms`, `session_time_p50_s` / `_mean_s` (first turn due to last turn
+done, for sessions of two or more measured turns), and the run's context:
+`measured_requests`, `warmup_requests`, `schedule_s` against `replay_s`,
+`in_flight_mean` / `in_flight_max`. The throughput keys (`input_tpm`,
+`output_tpm`, …) are left empty: the schedule sets the throughput, so it is
+not a result. A dataset without `timing` is refused at the start.
+
+#### Equivalent throughput
+
+The run's own TPM is set by the schedule, but its latencies are not: a
+faster engine finishes the same requests sooner, holding fewer in flight.
+`equivalent_tpm` turns that into the traffic the engine would serve behind a
+least-connections load balancer, which keeps its backends at about the same
+number of requests in flight, n. By Little's law a backend at n completes
+n / W(n) requests per second, W(n) being its mean latency at n, so over the
+time production spends at each n:
+
+    equivalent_tpm = Σ p(n) · n̄(n) · T / W(n)   over n ≥ 2, × 60
+
+- **p(n), n̄(n): production's time at each concurrency,** from the dataset's
+  logged send times and latencies (`timing.at_s`, `timing.rt_s`). They are the
+  same for every run of the dataset. At n ≤ 1 a balancer has no choice, so
+  those levels are left out.
+- **T: production's tokens per request** (prompt + completion, from each
+  capture's usage block), also fixed, so output-length noise between runs
+  stays out of the score.
+- **W(n): this run's mean latency at n,** each request placed at the mean
+  number in flight over its own lifetime, latency from send to last token.
+  Which requests run at n depends on the engine, so their sizes are matched
+  to production's mix at n: each request's size comes from its logged token
+  counts (a + b·uncached + c·cached + d·output, the load reading's model,
+  fitted once on the logged latencies), and W(n) = s_ref(n) · Σ latency /
+  Σ size. Levels with fewer than 20 requests are not measured.
+- **Levels the run did not reach.** A faster engine holds fewer requests in
+  flight on the same schedule and may never reach production's busiest
+  levels; a slower one may skip its quietest. Such a level gets the lower
+  bound its neighbours give (throughput does not fall, and latency does not
+  drop, as concurrency rises), so an engine is never credited with more than
+  it showed.
+
+Read it together with:
+
+| Metric | Meaning |
+| --- | --- |
+| `equivalent_coverage` | share of production's busy time (n ≥ 2) the run measured; the rest is bounded as above |
+| `equivalent_busy_share` | share of production's time at n ≥ 2. Near 0 the traffic is too light for throughput to matter, and the score carries little |
+| `equivalent_size_matched` / `equivalent_size_r2` | whether sizes were matched (0 when the captures carry no usage counts: plain means then), and how much of the logged latency the size model explains |
+| `equivalent_little_error` | the run's completions predicted from its own time and mean latency at each level, against the actual count, less one. Not zero even on production's own logged timeline: time is counted at the level of each moment, a request at its average level over its life, and the two differ most at n = 1. A few percent is normal on real traffic; much more means the curve does not account for the run |
+| `equivalent_tpm_logged` | the same score from the logged latencies. Production ran on its own hardware and was timed at the gateway, so this is a reference, not a baseline |
+
+The run's result also keeps what is behind the score, so it can be recomputed
+later from the dataset and the stored result alone:
+
+- `equivalent_curve`: per level, the time share, in-flight count, latency,
+  request count and TPM.
+- `equivalent_requests`: each request's send and end time (seconds from the
+  schedule's start, null when it was never sent), whether it succeeded, and its
+  prompt + completion tokens, as columns in dataset order. About 25 KB per
+  1,000 requests; runs over 20,000 requests keep only the score and the curve.
+
+Compare `equivalent_tpm` only between runs of the same dataset.
 
 ## 7. Submit and trace the result
 

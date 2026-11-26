@@ -534,7 +534,17 @@
     "importInFlightChecking": "检查记录中，已检查 {count} 条",
     "importSubmit": "导入",
     "importFailed": "导入失败",
-    "originUpload": "已导入"
+    "originUpload": "已导入",
+    "fLayout": "数据集形式",
+    "layoutSampled": "抽样：在时间窗口内分散抽取单个请求",
+    "layoutTimed": "按时间：一个窗口内的全部请求，按时间顺序，用于 1× 回放",
+    "layoutTimedShort": "按时间",
+    "fLayoutHint": "按时间形式保留一整段流量（样本数量个请求，处于一般负载），带每个请求的发送时间和所属 session，回放时可以按生产的节奏发送。",
+    "fSessionField": "Session 字段",
+    "fSessionFieldHint": "日志中 session id 所在的字段（用点号分隔）。留空则按消息前缀重建 session。",
+    "fMaxIdleGap": "最长空闲间隔（秒）",
+    "fMaxIdleGapHint": "没有请求在处理的时段会被缩短到这个长度，空闲的一小时几分钟就能回放完。",
+    "timedLine": "{requests} 个请求，{sessions} 个 session，{following}% 接在前一轮之后；{real} 分钟的流量回放只需 {replay} 分钟；一般并发 {c}。"
   },
   "users": {
     "subtitle": "只有超级管理员可以任命或撤销管理员。超级管理员角色需在后端直接授予，此处不可操作。",
@@ -684,5 +694,51 @@
     "ready": "✓ 评审端点就绪",
     "problems": "✗ 发现问题——请先修复再保存",
     "runFailed": "评审测试执行失败"
+  },
+  "loadReading": {
+    "title": "最近 {hours} 小时的负载",
+    "help": "只读网关日志得出。按请求运行时同时在处理的请求数分组；拟合一个请求大小模型，看同一个请求在每个负载档位下慢多少。knee 是多出来的负载不再变成 throughput、主要在排队的位置。",
+    "cat": {
+      "idle": "空闲",
+      "moderate": "中等",
+      "busy": "繁忙",
+      "unclear": "不确定"
+    },
+    "say": {
+      "idle": "空闲：只有 {share} 的请求是在 knee 之后（{knee}+ 并发）处理的。后端还有余量，更好的配置主要体现为更低的 latency。",
+      "moderate": "中等：{share} 的请求是在 knee 之后（{knee}+ 并发）处理的，这时多出来的负载主要在排队，而不是增加 throughput。",
+      "busy": "繁忙：{share} 的请求是在 knee 之后（{knee}+ 并发）处理的。一般的请求已经在排队，更好的配置主要体现为更高的 throughput。"
+    },
+    "noKnee": "空闲：在生产达到的最高 {max} 并发以内，latency 几乎不随负载增长，看不到 knee。",
+    "idleNoOverlap": "空闲：只有 {share} 的请求运行时有两个或以上并发，到不了 knee。",
+    "unclear": "不确定：请求大小模型和这份流量对不上（{checks}）。如果直接采用，结果会是“{fitted}”。",
+    "tooLittle": "流量太少，读不出负载：{note}。",
+    "failed": "这次构建没有负载读数：{error}",
+    "chartAria": "同一请求在各并发档位下的变慢倍数和请求数",
+    "slowdownAxis": "同一请求变慢倍数",
+    "requestsAxis": "请求数",
+    "xAxis": "请求运行时的并发数",
+    "knee": "knee",
+    "tip": "并发 {group}：{requests} 个请求（此档及以上占 {share}）。同一请求比并发 1 时慢 {slowdown}×（原始中位数 {raw}×）；进入此档的 e 为 {e}。平均 prompt {prompt} tok，输出 {out} tok。",
+    "typical": "一般并发",
+    "busiest": "最忙时段并发",
+    "requests": "读取的请求数",
+    "window": "时间窗口",
+    "fitTitle": "可信度",
+    "check": {
+      "r2": "请求大小能解释 latency（log latency 的 R² 为 {r2}，需要 ≥ 0.5）",
+      "no_drift_by_time_of_day": "残差没有随时段变化的规律",
+      "halves_agree": "双数日和单数日的 w_log 相差不超过 0.15（双数日：{even}，单数日：{odd}）",
+      "single_crossing": "曲线只穿过 knee 一次（多穿过 {crossings} 次）"
+    },
+    "checkShort": {
+      "r2": "R² 太低",
+      "no_drift_by_time_of_day": "随时段漂移",
+      "halves_agree": "两半结论不一致",
+      "single_crossing": "多次穿过 knee"
+    },
+    "sizeLine": "单个请求本身的大小：{fixed} s + 每 1k 未缓存 prompt token {uncached} s + 每 1k 已缓存 {cached} s + 每 1k 输出 token {output} s。",
+    "pastKnee": "{share} 的请求在 knee 之后",
+    "noteOnly": "（仅提示，不影响结论）"
   }
 }

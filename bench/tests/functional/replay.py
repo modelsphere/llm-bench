@@ -20,6 +20,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import queue
 import re
 import threading
 import time
@@ -32,12 +33,15 @@ import requests
 
 from bench.cache_usage import cache_metrics, cache_usage
 from bench.replay_test.jsonl_io import count_lines
+from bench.replay_test.timed_schedule import TimedSchedule, TimingMissing, time_weighted_mean
+from bench.replay_test import equivalent
 from bench.replay_test.log_replay_tool import (
     MatchedRequest,
     build_replay_body,
     is_retryable_http_status,
     load_extract_jsonl,
     percentile,
+    recorded_completion_tokens,
     request_needs_system_normalization,
 )
 from bench.result import TestResult
@@ -136,6 +140,109 @@ TTFT_INPUT_BUCKETS = [
     ("128k_256k", "128K-256K", 128 * 1024,   256 * 1024),
     ("ge_256k",   "≥256K",     256 * 1024,   float("inf")),
 ]
+
+
+# -- figures about the run itself ---------------------------------------------
+#
+# Three things a tuner wants beside the score, all computed from the run's own
+# per-request records at no extra cost. None of them judges a result: they are
+# reference values, named for what they cover.
+
+RESAMPLE_ROUNDS = 400
+
+
+def _request_tokens_and_time(r: Dict[str, Any]) -> Optional[Tuple[int, float]]:
+    total_ms = r.get("total_ms") or 0.0
+    tokens = (r.get("prompt_tokens") or 0) + (r.get("completion_tokens") or 0)
+    if total_ms <= 0 or tokens <= 0:
+        return None
+    return tokens, float(total_ms)
+
+
+def throughput_resample(successes: List[Dict[str, Any]], seed: int = 0,
+                        rounds: int = RESAMPLE_ROUNDS) -> Dict[str, Any]:
+    """How much the throughput depends on WHICH requests (and response lengths)
+    this run happened to have: the run's requests resampled with replacement,
+    throughput read as tokens over request time (wall time at a fixed
+    concurrency is request time divided by the concurrency), and the 5th and
+    95th percentile of the resampled values as a change against the run's own.
+    It misses whatever moves a whole run (placement, clocks, warm-up,
+    neighbours), so it reads smaller than the spread between two runs."""
+    pairs = [p for p in (_request_tokens_and_time(r) for r in successes) if p]
+    out: Dict[str, Any] = {"throughput_resample_requests": len(pairs)}
+    if len(pairs) < 20:
+        out.update(throughput_resample_p05_change_pct=None, throughput_resample_p95_change_pct=None)
+        return out
+    import random as _random
+    rng = _random.Random(seed)
+    tokens = [p[0] for p in pairs]
+    times = [p[1] for p in pairs]
+    point = sum(tokens) / sum(times)
+    n = len(pairs)
+    values = []
+    for _ in range(rounds):
+        t_sum = 0
+        ms_sum = 0.0
+        for _i in range(n):
+            j = rng.randrange(n)
+            t_sum += tokens[j]
+            ms_sum += times[j]
+        values.append(t_sum / ms_sum)
+    values.sort()
+    pct = lambda v: round((v - point) / point * 100.0, 3)  # noqa: E731
+    out.update(
+        throughput_resample_p05_change_pct=pct(percentile(values, 0.05)),
+        throughput_resample_p95_change_pct=pct(percentile(values, 0.95)),
+    )
+    return out
+
+
+def recorded_length_factor(successes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the throughput would be had every response been as long as its
+    recorded one, as a factor on the measured throughput. Each request's time
+    is modelled as its time to first token plus its time per output token
+    times its output length; the lengths are swapped for the recorded ones.
+    A score, not a noise figure: it removes what sampled response lengths do
+    to the score, under that model."""
+    tokens = times = tokens_rec = times_rec = 0.0
+    covered = 0
+    for r in successes:
+        pair = _request_tokens_and_time(r)
+        recorded = r.get("recorded_completion_tokens")
+        out_tokens = r.get("completion_tokens") or 0
+        ttft = r.get("ttft_ms")
+        if not pair or not recorded or out_tokens < 2 or ttft is None:
+            continue
+        total_ms = pair[1]
+        per_token = max(total_ms - ttft, 0.0) / (out_tokens - 1)
+        tokens += pair[0]
+        times += total_ms
+        tokens_rec += (r.get("prompt_tokens") or 0) + recorded
+        times_rec += ttft + per_token * max(recorded - 1, 0)
+        covered += 1
+    factor = None
+    if covered and times and times_rec and tokens:
+        factor = round((tokens_rec / times_rec) / (tokens / times), 5)
+    return {"recorded_length_score_factor": factor, "recorded_length_requests": covered}
+
+
+def output_length_metrics(successes: List[Dict[str, Any]], fixed: bool) -> Dict[str, Any]:
+    """Whether responses ran to their recorded length: with the fixed-length
+    switch on this should be (nearly) every request; off, it shows how far the
+    sampled lengths are from production's."""
+    with_recorded = [r for r in successes if r.get("recorded_completion_tokens")]
+    matched = sum(
+        1 for r in with_recorded
+        if abs((r.get("completion_tokens") or 0) - r["recorded_completion_tokens"]) <= 1
+    )
+    recorded_total = sum(r["recorded_completion_tokens"] for r in with_recorded)
+    actual_total = sum(r.get("completion_tokens") or 0 for r in with_recorded)
+    return {
+        "fixed_output_lengths": 1 if fixed else 0,
+        "requests_with_recorded_length": len(with_recorded),
+        "output_length_match_rate": (matched / len(with_recorded)) if with_recorded else None,
+        "output_tokens_vs_recorded_ratio": (actual_total / recorded_total) if recorded_total else None,
+    }
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -457,6 +564,31 @@ def classify_http_error(status_code: int, body_text: str) -> tuple:
     return f"http_{status_code}", message
 
 
+# A timed run keeps each request's send and end times with its result
+# (`equivalent_requests`), about 25 KB per 1,000 requests; a run longer than
+# this keeps only the score and the curve.
+EQUIVALENT_MAX_KEPT_REQUESTS = 20000
+
+
+def _request_columns(ran: List["equivalent.Ran"]) -> Optional[Dict[str, list]]:
+    """One column per field, in dataset order: send and end in seconds from the
+    schedule's start (ms precision, null for a request never sent), ok as 0/1,
+    and prompt + completion tokens. With the dataset's logged timing, enough to
+    recompute the score."""
+    if not ran or len(ran) > EQUIVALENT_MAX_KEPT_REQUESTS:
+        return None
+
+    def ms(v: Optional[float]) -> Optional[float]:
+        return None if v is None else round(v, 3)
+
+    return {
+        "send_s": [ms(r.send_s) for r in ran],
+        "end_s": [ms(r.end_s) for r in ran],
+        "ok": [1 if r.ok else 0 for r in ran],
+        "tokens": [int(r.tokens) for r in ran],
+    }
+
+
 class ReplayTest(BaseTest):
     """
     Replays the configured dataset (bench/examples/replay-smoke.jsonl by default)
@@ -500,13 +632,28 @@ class ReplayTest(BaseTest):
         judge_model: str = "",
         judge_api_key: str = "",
         judge_max_tokens: int = 256,
+        fixed_output_lengths: bool = False,
+        resample_seed: int = 0,
         judge_concurrency: int = 8,
         judge_prompt: str = "",
         judge_disable_thinking: bool = True,
         judge_seed: int = 0,
         judge_max_retries: int = 5,
+        schedule: str = "closed",
+        warmup_s: float = 30.0,
+        max_lag_s: float = 2.0,
+        max_in_flight: int = 512,
+        flush_cache: bool = True,
     ) -> None:
         super().__init__(api_url, model, api_key, output_dir)
+        # "closed" (default): `concurrency` workers send back to back.
+        # "timed": every request of a timed dataset is sent on its recorded
+        # timing (see bench/replay_test/timed_schedule.py and _run_timed).
+        self.schedule = schedule
+        self.warmup_s = warmup_s
+        self.max_lag_s = max_lag_s
+        self.max_in_flight = max_in_flight
+        self.flush_cache = flush_cache
         self.dataset_path = dataset_path
         self.concurrency = concurrency
         self.force_stream = force_stream
@@ -521,6 +668,9 @@ class ReplayTest(BaseTest):
         self.request_timeout = request_timeout
         self.max_retries = max_retries
         self.max_generation_tokens = max_generation_tokens
+        # Each response forced to its recorded length (see build_replay_body).
+        self.fixed_output_lengths = bool(fixed_output_lengths)
+        self.resample_seed = int(resample_seed)
         # Absolute in-memory backstop on buffered SSE events per response (guards
         # against runaway generations OOM-ing the worker; see REPLAY_MAX_SSE_EVENTS).
         self.max_sse_events = max_sse_events
@@ -568,6 +718,8 @@ class ReplayTest(BaseTest):
     # ------------------------------------------------------------------
 
     def run(self) -> TestResult:
+        if self.schedule == "timed":
+            return self._run_timed_test()
         plan = self._prepare_records()
         if plan is None:
             return TestResult(
@@ -818,7 +970,12 @@ class ReplayTest(BaseTest):
         t0 = time.monotonic()
 
         def send(idx: int, record: MatchedRequest) -> None:
-            results[idx] = self._send_request(record, url)
+            result = self._send_request(record, url)
+            # What production answered with, for the length-corrected score
+            # and the fixed-length check (a canceled slot stays as it is).
+            if isinstance(result, dict):
+                result["recorded_completion_tokens"] = recorded_completion_tokens(record)
+            results[idx] = result
 
         record_iter = make_iter()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=self.concurrency)
@@ -925,6 +1082,294 @@ class ReplayTest(BaseTest):
 
         return results
 
+    # ------------------------------------------------------------------
+    # Timed replay (1× load)
+    # ------------------------------------------------------------------
+
+    def _run_timed_test(self) -> TestResult:
+        """Replay a timed dataset on its recorded timing.
+
+        Every request is sent at its due time (see TimedSchedule): no client
+        concurrency limit, so the engine sees the load production saw. Latency
+        is measured from the due time, not from when the client got round to
+        sending, so client lag is never hidden; `schedule_lag_p99_s` reports
+        it and `fell_behind` marks a run whose client could not keep up.
+        """
+        path = Path(self.dataset_path) if self.dataset_path else None
+        if path is None or not path.exists():
+            return TestResult(name=self.name, passed=False, metrics={},
+                              error=f"Dataset not found: {self.dataset_path}")
+        records = list(load_extract_jsonl(str(path), lean=True))
+        if not records:
+            return TestResult(name=self.name, passed=False, metrics={},
+                              error=f"Dataset empty or unreadable: {self.dataset_path}")
+        try:
+            sched = TimedSchedule([r.timing for r in records])
+        except TimingMissing as exc:
+            return TestResult(name=self.name, passed=False, metrics={}, error=str(exc))
+
+        logger.info(
+            "[%s] Timed replay of %d requests over %.0fs of schedule (warm-up %.0fs, in-flight cap %d)",
+            self.name, len(records), max(sched.at_s), self.warmup_s, self.max_in_flight,
+        )
+        if self.save_responses:
+            self._open_response_log()
+        if self.judge_enable:
+            self._judge_setup()
+        try:
+            self._preflight_tool_check(lambda: iter(records))
+            # Flush last, right before the first request, so every config starts
+            # from the same empty prefix cache.
+            flushed = self._flush_prefix_cache() if self.flush_cache else ""
+            if self.flush_cache and not flushed:
+                logger.warning("[%s] prefix cache flush: no endpoint answered; replaying from the cache as it is", self.name)
+            results, stats = self._run_timed(records, sched)
+            metrics = self._timed_metrics(records, results, stats)
+            metrics["cache_flushed"] = 1 if flushed else 0
+            metrics.update(self._run_judge_phase())
+            passed = self._check_redlines(metrics) and not metrics.get("fell_behind")
+            logger.info("[%s] timed replay %s. metrics=%s", self.name, "PASSED" if passed else "FAILED", metrics)
+            return TestResult(name=self.name, passed=passed, metrics=metrics)
+        finally:
+            self._close_response_log()
+            if self._judge_pool is not None:
+                self._judge_pool.shutdown(wait=False, cancel_futures=True)
+                self._judge_pool = None
+
+    def _flush_prefix_cache(self, tries: int = 6) -> str:
+        """Empty the engine's prefix cache: SGLang's /flush_cache, vLLM's
+        /reset_prefix_cache. SGLang refuses while requests are in flight, so it
+        is retried for a while. Says which answered, or "" when none did."""
+        base = self.api_url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        for i in range(tries):
+            for p in ("/flush_cache", "/reset_prefix_cache"):
+                try:
+                    r = self._session.post(base + p, timeout=30)
+                    if r.status_code < 300:
+                        logger.info("[%s] prefix cache flushed via %s", self.name, p)
+                        return p
+                except Exception:
+                    pass
+            if i + 1 < tries:
+                time.sleep(5)
+        return ""
+
+    def _run_timed(self, records: List[MatchedRequest], sched: TimedSchedule) -> Tuple[List[Dict], Dict[str, Any]]:
+        url = join_endpoint(self.api_url, "chat/completions")
+        n = len(records)
+        results: List[Dict] = [{} for _ in range(n)]
+        finished: "queue.Queue[Tuple[int, float]]" = queue.Queue()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_in_flight)
+        t0 = time.monotonic()
+
+        def send(idx: int, due_s: float) -> None:
+            t_call = time.monotonic() - t0
+            try:
+                res = self._send_request(records[idx], url)
+            except Exception as exc:  # _send_request catches its own; this is a backstop
+                res = {"request_id": records[idx].request_id, "success": False, "ttft_ms": None,
+                       "total_ms": 0.0, "error": repr(exc), "error_class": type(exc).__name__}
+            end_s = time.monotonic() - t0
+            lag_s = max(0.0, t_call - due_s)
+            # What production answered with, for the length-corrected score
+            # and the fixed-length check.
+            res["recorded_completion_tokens"] = recorded_completion_tokens(records[idx])
+            res["due_s"] = due_s
+            res["lag_s"] = lag_s
+            res["end_s"] = end_s
+            # Latency from the due time: what a user who sent it on time saw.
+            if res.get("error_class") != "canceled":
+                if res.get("ttft_ms") is not None:
+                    res["ttft_ms"] = res["ttft_ms"] + lag_s * 1000.0
+                res["total_ms"] = (end_s - due_s) * 1000.0
+            results[idx] = res
+            finished.put((idx, end_s))
+
+        in_flight = 0
+        peak = 0
+        changes: List[Tuple[float, int]] = [(0.0, 0)]
+        cap_hit = False
+        completed = 0
+        report_every = max(1, n // 20)
+        last_reported = 0
+        stop_reason = ""
+
+        def on_finish(item: Tuple[int, float]) -> None:
+            nonlocal in_flight, completed
+            idx, end_s = item
+            in_flight -= 1
+            completed += 1
+            changes.append((end_s, in_flight))
+            sched.finished(idx, end_s)
+
+        logger.info("[%s] BEGIN timed batch  total=%d  url=%s", self.name, n, url)
+        try:
+            while True:
+                while True:
+                    try:
+                        on_finish(finished.get_nowait())
+                    except queue.Empty:
+                        break
+                now = time.monotonic() - t0
+                room = self.max_in_flight - in_flight
+                for idx, due in sched.pop_due(now, limit=max(0, room)):
+                    pool.submit(send, idx, due)
+                    in_flight += 1
+                    changes.append((now, in_flight))
+                peak = max(peak, in_flight)
+                nd = sched.next_due()
+                if nd is not None and nd <= now and in_flight >= self.max_in_flight:
+                    if not cap_hit:
+                        logger.warning("[%s] in-flight cap %d reached at %.0fs; requests wait (their lag counts)",
+                                       self.name, self.max_in_flight, now)
+                    cap_hit = True
+                if in_flight == 0 and nd is None:
+                    if sched.waiting():
+                        logger.error("[%s] %d requests never became due (their earlier turn never finished)",
+                                     self.name, sched.waiting())
+                    break
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    stop_reason = "canceled"
+                elif self.max_seconds > 0 and now >= self.max_seconds:
+                    stop_reason = "time_budget"
+                if stop_reason:
+                    logger.warning("[%s] timed batch stopped (%s) at %.0fs with %d in flight, %d not yet sent",
+                                   self.name, stop_reason, now, in_flight, sched.waiting())
+                    try:
+                        self._session.close()
+                    except Exception:
+                        pass
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    break
+                if completed - last_reported >= report_every:
+                    last_reported = completed
+                    if self.progress_cb is not None:
+                        self.progress_cb(0.1 + 0.8 * completed / n, f"Replayed {completed}/{n} requests (timed)")
+                wait_s = 1.0 if nd is None else max(0.0, min(1.0, nd - now))
+                try:
+                    on_finish(finished.get(timeout=wait_s))
+                except queue.Empty:
+                    pass
+        finally:
+            try:
+                pool.shutdown(wait=False)
+            except Exception:
+                pass
+
+        end = time.monotonic() - t0
+        logger.info("[%s] END   timed batch  completed=%d/%d  replay=%.1fs  peak in flight=%d",
+                    self.name, completed, n, end, peak)
+        return results, {
+            "replay_s": end,
+            "in_flight_max": peak,
+            "in_flight_mean": time_weighted_mean(changes, end),
+            "cap_hit": cap_hit,
+            "stop_reason": stop_reason,
+        }
+
+    def _timed_metrics(self, records: List[MatchedRequest], results: List[Dict],
+                       stats: Dict[str, Any]) -> Dict[str, Any]:
+        """The usual replay metrics over the measured requests (after the
+        warm-up), plus the timed ones. The flat TPM keys are left empty: in a
+        timed replay the schedule sets the throughput, so it is not a result."""
+        at = [float(r.timing["at_s"]) for r in records]
+        measured_idx = [i for i in range(len(records)) if at[i] >= self.warmup_s]
+        if not measured_idx:
+            logger.warning("[%s] the schedule is shorter than the warm-up (%.0fs): measuring every request",
+                           self.name, self.warmup_s)
+            measured_idx = list(range(len(records)))
+        measured = [results[i] for i in measured_idx]
+        ran = [r for r in measured if r.get("due_s") is not None]
+        span = (max(r["end_s"] for r in ran) - min(r["due_s"] for r in ran)) if ran else 0.0
+        metrics = self._aggregate(measured, span)
+        for k in ("input_tpm", "output_tpm", "cached_tpm", "uncached_input_tpm"):
+            metrics[k] = None
+
+        ok = [r for r in measured if r.get("success")]
+        e2e = sorted(r["total_ms"] for r in ok if r.get("total_ms") is not None)
+        tpot = sorted(
+            (r["total_ms"] - r["ttft_ms"]) / (r["completion_tokens"] - 1)
+            for r in ok
+            if r.get("ttft_ms") is not None and (r.get("completion_tokens") or 0) > 1
+        )
+
+        # Session time: first turn due → last turn done, for sessions of two or
+        # more turns that all ran after the warm-up and all succeeded.
+        by_session: Dict[str, List[int]] = {}
+        for i, rec in enumerate(records):
+            s = (rec.timing or {}).get("session") or ""
+            if s:
+                by_session.setdefault(s, []).append(i)
+        measured_set = set(measured_idx)
+        session_times = []
+        for idxs in by_session.values():
+            if len(idxs) < 2 or not all(i in measured_set and results[i].get("success") for i in idxs):
+                continue
+            session_times.append(max(results[i]["end_s"] for i in idxs) - min(results[i]["due_s"] for i in idxs))
+        session_times.sort()
+
+        lags = sorted(r["lag_s"] for r in results if r.get("lag_s") is not None)
+        lag_p99 = percentile(lags, 0.99) if lags else None
+        fell_behind = 1 if (lag_p99 is not None and lag_p99 > self.max_lag_s) else 0
+        if fell_behind:
+            logger.warning("[%s] FELL BEHIND: p99 send lag %.2fs > %.2fs — the client could not keep the schedule; "
+                           "this run's latencies are not a fair reading", self.name, lag_p99, self.max_lag_s)
+
+        metrics.update({
+            "e2e_p50_ms": percentile(e2e, 0.50) if e2e else None,
+            "e2e_p90_ms": percentile(e2e, 0.90) if e2e else None,
+            "e2e_mean_ms": sum(e2e) / len(e2e) if e2e else None,
+            "tpot_p50_ms": percentile(tpot, 0.50) if tpot else None,
+            "session_time_p50_s": percentile(session_times, 0.50) if session_times else None,
+            "session_time_mean_s": sum(session_times) / len(session_times) if session_times else None,
+            "sessions_measured": len(session_times),
+            "measured_requests": len(measured),
+            "warmup_requests": len(records) - len(measured),
+            "schedule_s": max(at),
+            "replay_s": stats["replay_s"],
+            "schedule_lag_p99_s": lag_p99,
+            "fell_behind": fell_behind,
+            "max_in_flight_hit": 1 if stats["cap_hit"] else 0,
+            "in_flight_mean": stats["in_flight_mean"],
+            "in_flight_max": stats["in_flight_max"],
+        })
+        metrics.update(self._equivalent_metrics(records, results))
+        return metrics
+
+    def _equivalent_metrics(self, records: List[MatchedRequest], results: List[Dict]) -> Dict[str, Any]:
+        """Equivalent throughput (bench/replay_test/equivalent.py): the run's
+        latency at each concurrency, weighted by the time production spent
+        there. The curve behind it is kept as `equivalent_curve`, and each
+        request's send and end times as `equivalent_requests`, so the score can
+        be recomputed later from the dataset and the stored result alone (the
+        run's output directory is deleted after a clean run)."""
+        logged = [equivalent.logged_of(r.timing, r.recorded_usage) for r in records]
+        ran = []
+        for res in results:
+            due, end = res.get("due_s"), res.get("end_s")
+            sent = None if due is None or end is None or res.get("error_class") == "canceled" \
+                else due + (res.get("lag_s") or 0.0)
+            ran.append(equivalent.Ran(
+                send_s=sent, end_s=end if sent is not None else None, ok=bool(res.get("success")),
+                tokens=float((res.get("prompt_tokens") or 0) + (res.get("completion_tokens") or 0))))
+        kept = _request_columns(ran)
+        try:
+            out = equivalent.equivalent_throughput(logged, ran, self.warmup_s)
+        except Exception:  # a scoring bug must not cost the run its other metrics
+            logger.exception("[%s] equivalent throughput failed", self.name)
+            return {"equivalent_requests": kept} if kept else {}
+        out["equivalent_curve"] = out.pop("curve", [])
+        if kept:
+            out["equivalent_requests"] = kept
+        logger.info("[%s] equivalent throughput %s tok/min (logged %s), coverage %s, busy share %s, "
+                    "size matched %s (R² %s), Little %s",
+                    self.name, out["equivalent_tpm"], out["equivalent_tpm_logged"], out["equivalent_coverage"],
+                    out["equivalent_busy_share"], out["equivalent_size_matched"], out["equivalent_size_r2"],
+                    out["equivalent_little_error"])
+        return out
+
     def _send_request(
         self,
         record: MatchedRequest,
@@ -971,6 +1416,7 @@ class ReplayTest(BaseTest):
             record, self.model, force_stream=self.force_stream,
             max_generation_tokens=self.max_generation_tokens,
             clean=self.clean,
+            fixed_output_tokens=(recorded_completion_tokens(record) or 0) if self.fixed_output_lengths else 0,
         )
         had_tool = _record_has_tool_messages(record)
         # Does this record carry a multimodal image content part? A text-only
@@ -1319,6 +1765,9 @@ class ReplayTest(BaseTest):
             "tokens_after_finish": tokens_after_finish,
             "repetitive_tokens": repetitive_tokens,
             "generation_capped": generation_capped,
+            # How many times it was sent: above 1, a retry re-sent the whole
+            # request, and its latency includes the failed attempts and waits.
+            "attempts": attempt,
             "status_code": status_code,
             "had_tool_messages": had_tool,
             # Heuristic: a tool-carrying request that the server rejected with a
@@ -1909,6 +2358,11 @@ class ReplayTest(BaseTest):
         # max_tokens (see max_generation_tokens). A non-zero count means the cap
         # is doing its job AND the target tends to run away on some prompts.
         generation_capped_count = sum(1 for r in successes if r.get("generation_capped"))
+        # Requests the client sent more than once (a connection error, timeout or
+        # broken stream, then a retry), over every measured request: each one's
+        # latency includes its failed attempts, and the engine saw it twice.
+        retried_requests = sum(1 for r in results if (r.get("attempts") or 1) > 1)
+        retry_attempts = sum(max(0, (r.get("attempts") or 1) - 1) for r in results)
 
         # Aggregate token totals across all successful requests. If the service
         # did not report `cached_tokens` in any usage block, total_cached_tokens
@@ -2010,11 +2464,16 @@ class ReplayTest(BaseTest):
             "tokens_after_finish_count": tokens_after_finish_count,
             "repetitive_token_count": repetitive_token_count,
             "generation_capped_count": generation_capped_count,
+            "retried_requests": retried_requests,
+            "retry_attempts": retry_attempts,
             "finish_reason_length_count": finish_reasons.count("length"),
             "finish_reason_stop_count": finish_reasons.count("stop"),
             "finish_marker_counts": {
                 m: finish_markers.count(m) for m in set(finish_markers)
             },
+            **output_length_metrics(successes, self.fixed_output_lengths),
+            **throughput_resample(successes, seed=self.resample_seed),
+            **recorded_length_factor(successes),
         }
 
     def _check_redlines(self, metrics: Dict[str, Any]) -> bool:

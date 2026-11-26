@@ -13,7 +13,8 @@ WORKDIR /app
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 COPY package*.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci
 
 COPY . .
 

@@ -154,10 +154,60 @@ class ReplayParams(BaseModel):
                     "stale=true. 0 disables the check.",
         json_schema_extra={"x-visible-when": {"dataset_source": ["auto"]}},
     )
-    concurrency: int = Field(default=5, ge=1, le=4096, description="Concurrent replay workers")
+    # --- schedule ---------------------------------------------------------
+    # "closed" (the default) is the historical behaviour: `concurrency` workers
+    # send back to back, which measures capacity. "timed" replays a timed
+    # dataset (a profile built with layout 'timed') on its recorded timing, so
+    # the engine sees production's real load and latency is what users saw.
+    schedule: str = Field(
+        default="closed",
+        title="Schedule",
+        description="closed = `concurrency` workers send back to back (default). "
+                    "timed = send every request of a timed dataset on its recorded "
+                    "timing (1x production load): a session's next turn goes out "
+                    "its recorded think time after the previous turn finishes on "
+                    "this engine. Needs a dataset built with layout 'timed'.",
+        json_schema_extra={"enum": ["closed", "timed"]},
+    )
+    warmup_s: float = Field(
+        default=30.0, ge=0.0,
+        title="Warm-up (seconds of schedule)",
+        description="Requests due in the first this-many seconds of the schedule "
+                    "are sent but not measured.",
+        json_schema_extra={"x-visible-when": {"schedule": ["timed"]}},
+    )
+    max_lag_s: float = Field(
+        default=2.0, gt=0.0,
+        title="Max send lag (s)",
+        description="When the p99 delay between a request's due time and its send "
+                    "exceeds this, the run is marked fell_behind (and fails): the "
+                    "client could not keep the schedule.",
+        json_schema_extra={"x-visible-when": {"schedule": ["timed"]}},
+    )
+    max_in_flight: int = Field(
+        default=512, ge=1, le=4096,
+        title="In-flight safety cap",
+        description="Most requests open at once. Reaching it makes later requests "
+                    "wait (their wait counts as latency) and sets max_in_flight_hit.",
+        json_schema_extra={"x-visible-when": {"schedule": ["timed"]}},
+    )
+    flush_cache: bool = Field(
+        default=True,
+        title="Flush the prefix cache first",
+        description="Ask the engine to empty its prefix cache (SGLang /flush_cache, "
+                    "vLLM /reset_prefix_cache) before the timed replay, so every "
+                    "config starts from the same state.",
+        json_schema_extra={"x-visible-when": {"schedule": ["timed"]}},
+    )
+    concurrency: int = Field(
+        default=5, ge=1, le=4096, description="Concurrent replay workers",
+        json_schema_extra={"x-visible-when": {"schedule": ["closed"]}},
+    )
     max_samples: int = Field(
         default=0, ge=0,
-        description="Max requests to replay (0 = all). Use a small value for faster CI runs."
+        description="Max requests to replay (0 = all). Use a small value for faster CI runs. "
+                    "Not used by a timed replay, which always sends the whole dataset.",
+        json_schema_extra={"x-visible-when": {"schedule": ["closed"]}},
     )
     request_timeout: float = Field(default=600.0, ge=1.0, le=86400.0, description="Per-request HTTP timeout in seconds")
     max_retries: int = Field(default=3, ge=0, description="Retries per failed request")
@@ -169,6 +219,16 @@ class ReplayParams(BaseModel):
                     "per-read socket timeout and does NOT cap a response that keeps "
                     "streaming. The client also stops reading after ~2x this value "
                     "as a backstop for servers that overrun the limit."
+    )
+    fixed_output_lengths: bool = Field(
+        default=False,
+        description="Force every response to its recorded length: max_tokens and "
+                    "min_tokens set to the length production answered with, EOS and "
+                    "stop strings ignored. Every engine under test then does the same "
+                    "work, so the score measures speed, not how long the sampled "
+                    "answers happened to be. Requests whose capture has no usage keep "
+                    "their own length (see requests_with_recorded_length). Off by "
+                    "default: the replay stays as recorded."
     )
     save_responses: bool = Field(
         default=False,
@@ -303,6 +363,14 @@ class ReplayParams(BaseModel):
         # judge_failures at the end of a multi-hour run.
         return v.strip()
 
+    @field_validator("schedule")
+    @classmethod
+    def _known_schedule(cls, v: str) -> str:
+        v = (v or "closed").strip().lower()
+        if v not in ("closed", "timed"):
+            raise ValueError("schedule must be 'closed' or 'timed'")
+        return v
+
     @field_validator("dataset_source")
     @classmethod
     def _known_dataset_source(cls, v: str) -> str:
@@ -418,6 +486,15 @@ class ReplayModule(TestModule):
         MetricDescriptor("image_4xx_errors",             "Image 4xx",             "",      "Image-carrying requests rejected with 4xx — what the failed request CARRIED, not why it died (an over-context image request counts here too). For the actual cause, read error_class_counts (image_load = real image decode/fetch failures, incl. 5xx)", higher_is_better=False),
         MetricDescriptor("multi_system_requests",        "Multi-System Reqs",     "",      "Attempted requests carrying >1 or out-of-order system messages (the shape strict Qwen/SGLang templates reject). Set clean=true to normalize them", higher_is_better=False),
         MetricDescriptor("multi_system_4xx_errors",      "Multi-System 4xx",      "",      "Multi-system requests rejected with 4xx — what the failed request CARRIED, not why it died (with clean=true the system shape is already normalized, so a nonzero count here usually has another cause). Read error_class_counts (multi_system_template = real template rejects)", higher_is_better=False),
+        MetricDescriptor("throughput_resample_p05_change_pct", "Resampled Throughput p5", "%", "Range within this run: the run's requests resampled with replacement; the 5th percentile of the resampled throughput as a change against the run's own. How much the score depends on which requests and response lengths happened; misses what moves a whole run, so it reads smaller than the spread between runs", higher_is_better=True),
+        MetricDescriptor("throughput_resample_p95_change_pct", "Resampled Throughput p95", "%", "Range within this run: the 95th percentile of the resampled throughput as a change against the run's own (see the p5 figure)", higher_is_better=True),
+        MetricDescriptor("throughput_resample_requests", "Resampled Requests", "", "Requests behind the range within this run", higher_is_better=True),
+        MetricDescriptor("recorded_length_score_factor", "Recorded-Length Factor", "x", "Throughput at recorded output lengths over the measured throughput: each request's time modelled as time to first token plus time per output token times its length, the lengths swapped for the recorded ones. Multiply a throughput score by it for the score at recorded output lengths", higher_is_better=True),
+        MetricDescriptor("recorded_length_requests", "Recorded-Length Requests", "", "Requests behind the recorded-length factor", higher_is_better=True),
+        MetricDescriptor("fixed_output_lengths", "Fixed Output Lengths", "", "1 when every response was forced to its recorded length", higher_is_better=True),
+        MetricDescriptor("requests_with_recorded_length", "Requests With Recorded Length", "", "Successful requests whose capture recorded an output length", higher_is_better=True),
+        MetricDescriptor("output_length_match_rate", "Output Length Match", "", "Share of those whose response ran to the recorded length (within one token)", higher_is_better=True),
+        MetricDescriptor("output_tokens_vs_recorded_ratio", "Output vs Recorded Tokens", "x", "Output tokens over recorded output tokens, over the requests with a recorded length", higher_is_better=True),
         MetricDescriptor("system_normalized_count",      "System Normalized",     "",      "Requests whose system messages the clean toggle actually rewrote (0 when clean=false)", higher_is_better=True),
         MetricDescriptor("error_rate",                   "Error Rate",            "%",     "Fraction of attempted requests that errored",     higher_is_better=False),
         MetricDescriptor("unfinished_requests",          "Unfinished",            "",      "Successful requests with no finish marker",       higher_is_better=False),
@@ -441,6 +518,8 @@ class ReplayModule(TestModule):
         MetricDescriptor("cache_hit_rate",               "Cache Hit Rate",        "%",     "Token-weighted cache hit rate among requests reporting both input and cached usage", higher_is_better=True),
         MetricDescriptor("tokens_after_finish_count",    "Tokens After Finish",   "",      "Tokens received after finish_reason was set",     higher_is_better=False),
         MetricDescriptor("repetitive_token_count",       "Repetitive Tokens",     "",      "Requests with 10 identical final tokens",         higher_is_better=False),
+        MetricDescriptor("retried_requests",             "Retried Requests",      "",      "Measured requests the client sent more than once (a connection error, timeout or broken stream, then a retry): each one's latency includes its failed attempts and the waits between them, and the engine saw it more than once", higher_is_better=False),
+        MetricDescriptor("retry_attempts",               "Retry Attempts",        "",      "Extra sends over all measured requests (retried_requests counts the requests)", higher_is_better=False),
         MetricDescriptor("generation_capped_count",      "Generation Capped",     "",      "Requests the client stopped because the server overran the injected max_tokens (runaway output)", higher_is_better=False),
         MetricDescriptor("finish_reason_length_count",   "Truncated Count",       "",      "Requests truncated by length limit",              higher_is_better=False),
         MetricDescriptor("finish_reason_stop_count",     "Normal Stop Count",     "",      "Requests that finished normally (stop)",          higher_is_better=True),
@@ -457,6 +536,34 @@ class ReplayModule(TestModule):
         MetricDescriptor("judge_halluc_clear_rate",      "Judge Halluc (clear)",  "%",     "Fraction of kept samples with a clear hallucination (fabricated facts/citations/IDs beyond the given material)", higher_is_better=False),
         MetricDescriptor("judge_halluc_suspected_count", "Judge Halluc (suspected)", "",   "Kept samples with a suspected (unverifiable) hallucination", higher_is_better=False),
         MetricDescriptor("judge_failures",               "Judge Failures",        "",      "Answered samples the judge failed to grade (transport/parse error) — excluded from the rates; a large value means the judge endpoint is misconfigured", higher_is_better=False),
+        # Timed replay only (schedule=timed); absent on closed-loop runs.
+        MetricDescriptor("e2e_p50_ms",                   "E2E Latency P50",       "ms",    "Timed replay: request latency from its due time to its last token, median", higher_is_better=False),
+        MetricDescriptor("e2e_p90_ms",                   "E2E Latency P90",       "ms",    "Timed replay: request latency from its due time to its last token, 90th percentile", higher_is_better=False),
+        MetricDescriptor("e2e_mean_ms",                  "E2E Latency Mean",      "ms",    "Timed replay: request latency from its due time to its last token, mean", higher_is_better=False),
+        MetricDescriptor("tpot_p50_ms",                  "TPOT P50",              "ms",    "Time per output token after the first, median", higher_is_better=False),
+        MetricDescriptor("session_time_p50_s",           "Session Time P50",      "s",     "Timed replay: first turn due to last turn done, for sessions of two or more measured turns, median", higher_is_better=False),
+        MetricDescriptor("session_time_mean_s",          "Session Time Mean",     "s",     "Timed replay: session time, mean", higher_is_better=False),
+        MetricDescriptor("sessions_measured",            "Sessions Measured",     "",      "Timed replay: sessions counted in session time", higher_is_better=True),
+        MetricDescriptor("measured_requests",            "Measured Requests",     "",      "Timed replay: requests due after the warm-up (the ones measured)", higher_is_better=True),
+        MetricDescriptor("warmup_requests",              "Warm-up Requests",      "",      "Timed replay: requests sent in the warm-up and not measured", higher_is_better=True),
+        MetricDescriptor("schedule_s",                   "Schedule Length",       "s",     "Timed replay: recorded time of the last request's send, idle gaps removed", higher_is_better=False),
+        MetricDescriptor("replay_s",                     "Replay Time",           "s",     "Timed replay: wall clock from the first send to the last request done", higher_is_better=False),
+        MetricDescriptor("schedule_lag_p99_s",           "Send Lag P99",          "s",     "Timed replay: delay between a request's due time and its send, 99th percentile (client health)", higher_is_better=False),
+        MetricDescriptor("fell_behind",                  "Fell Behind",           "",      "Timed replay: 1 when the send lag p99 exceeded max_lag_s — the client could not keep the schedule and the latencies are not a fair reading", higher_is_better=False),
+        MetricDescriptor("max_in_flight_hit",            "In-flight Cap Hit",     "",      "Timed replay: 1 when the in-flight safety cap made requests wait", higher_is_better=False),
+        MetricDescriptor("in_flight_mean",               "In Flight (mean)",      "",      "Timed replay: requests open at once, time-weighted mean", higher_is_better=False),
+        MetricDescriptor("in_flight_max",                "In Flight (max)",       "",      "Timed replay: most requests open at once", higher_is_better=False),
+        MetricDescriptor("cache_flushed",                "Cache Flushed",         "",      "Timed replay: 1 when the engine confirmed a prefix cache flush before the replay", higher_is_better=True),
+        # Equivalent throughput (bench/replay_test/equivalent.py). Timed replay
+        # only; None when the dataset's timing gives nothing to weight with.
+        MetricDescriptor("equivalent_tpm",               "Equivalent TPM",        "tok/min", "Timed replay: total tokens per minute this engine would serve behind a least-connections balancer, at production's concurrency: Σ p(n)·n·T/W(n) over n ≥ 2, with p(n) production's time share at n in flight, T production's tokens per request and W(n) this run's mean latency at n (request sizes matched to production's). Compare runs of the same dataset", higher_is_better=True),
+        MetricDescriptor("equivalent_tpm_logged",        "Equivalent TPM (logged)", "tok/min", "Timed replay: the same score from production's logged latencies, for reference. It ran on production's hardware and was timed at the gateway, so it is not a baseline for this engine", higher_is_better=True),
+        MetricDescriptor("equivalent_coverage",          "Equivalent Coverage",   "",      "Timed replay: share of production's time at 2+ in flight that the score covers (levels where this run had enough requests). Below about 0.8 the score leaves out busy time", higher_is_better=True),
+        MetricDescriptor("equivalent_busy_share",        "Busy Share",            "",      "Timed replay: share of production's time with 2+ requests in flight. Near 0 the traffic is too light for throughput to matter; the score then carries little", higher_is_better=True),
+        MetricDescriptor("equivalent_size_matched",      "Size Matched",          "",      "Timed replay: 1 when request sizes from the logged token counts were matched to production's mix at each concurrency; 0 = plain mean latencies (the dataset has no usage counts)", higher_is_better=True),
+        MetricDescriptor("equivalent_size_r2",           "Size Model R²",         "",      "Timed replay: how much of the logged latency (log scale) the size model explains", higher_is_better=True),
+        MetricDescriptor("equivalent_little_error",      "Little's Law Error",    "",      "Timed replay: requests predicted from this run's time and mean latency at each concurrency over those it completed, less one. Within a few percent the curve accounts for the run", higher_is_better=False),
+        MetricDescriptor("equivalent_levels",            "Equivalent Levels",     "",      "Timed replay: concurrency levels (2+) the score is built from", higher_is_better=True),
     ] + _ttft_bucket_descriptors()
 
     default_metric_configs = [
@@ -557,6 +664,17 @@ class ReplayModule(TestModule):
         MetricConfig("judge_halluc_clear_rate",      role="display"),
         MetricConfig("judge_halluc_suspected_count", role="display"),
         MetricConfig("judge_failures",               role="display"),
+        # Timed replay: a run whose client fell behind is not a fair reading.
+        # None on closed-loop runs, which check_redlines skips.
+        MetricConfig("fell_behind",                  role="redline", max_val=0.0),
+    ] + [MetricConfig(k, role="display") for k in (
+        "e2e_p50_ms", "e2e_p90_ms", "e2e_mean_ms", "tpot_p50_ms", "session_time_p50_s",
+        "session_time_mean_s", "sessions_measured", "measured_requests", "warmup_requests",
+        "schedule_s", "replay_s", "schedule_lag_p99_s", "fell_behind", "max_in_flight_hit",
+        "in_flight_mean", "in_flight_max", "cache_flushed",
+        "equivalent_tpm", "equivalent_tpm_logged", "equivalent_coverage", "equivalent_busy_share",
+        "equivalent_size_matched", "equivalent_size_r2", "equivalent_little_error", "equivalent_levels",
+    )] + [
     # The per-bucket TTFT metrics are reported, not judged — see
     # EXAMPLE_TTFT_REDLINES_MS for why, and for the shape of a table that does.
     ] + _ttft_bucket_display_configs()
@@ -600,8 +718,11 @@ class ReplayModule(TestModule):
         p: ReplayParams = params  # type: ignore[assignment]
         os.makedirs(output_dir, exist_ok=True)
 
-        progress_cb(0.05, f"Starting replay: concurrency={p.concurrency}, "
-                         f"max_samples={p.max_samples or 'all'}")
+        if p.schedule == "timed":
+            progress_cb(0.05, "Starting timed replay (recorded timing, 1x load)")
+        else:
+            progress_cb(0.05, f"Starting replay: concurrency={p.concurrency}, "
+                             f"max_samples={p.max_samples or 'all'}")
 
         # All runtime knobs are passed as ReplayTest constructor args. We do NOT
         # set REPLAY_* env vars: the underlying module reads env exactly once at
@@ -672,6 +793,7 @@ class ReplayModule(TestModule):
                 request_timeout=p.request_timeout,
                 max_retries=p.max_retries,
                 max_generation_tokens=p.max_generation_tokens,
+                fixed_output_lengths=p.fixed_output_lengths,
                 save_responses=p.save_responses,
                 save_responses_max_bytes=p.save_responses_max_bytes,
                 judge_enable=p.judge_enable,
@@ -686,6 +808,11 @@ class ReplayModule(TestModule):
                 judge_disable_thinking=p.judge_disable_thinking,
                 judge_seed=p.judge_seed,
                 judge_max_retries=p.judge_max_retries,
+                schedule=p.schedule,
+                warmup_s=p.warmup_s,
+                max_lag_s=p.max_lag_s,
+                max_in_flight=p.max_in_flight,
+                flush_cache=p.flush_cache,
                 # Force-permissive redlines: the platform evaluator handles
                 # pass/fail via MetricConfig rules; ReplayTest itself should
                 # never gate on its own redlines when invoked from here.
@@ -702,6 +829,9 @@ class ReplayModule(TestModule):
             return ModuleResult(error=err)
 
         metrics = result.metrics
+        if result.error and not metrics:
+            # e.g. a timed replay of a dataset with no timing: refused up front.
+            return ModuleResult(error=result.error)
         progress_cb(0.99, f"Metrics collected — uptime={metrics.get('uptime', '?')}")
         logger.info("[replay] uptime=%s ttft_p99=%s total_time_p99=%s",
                     metrics.get("uptime"), metrics.get("ttft_p99_ms"), metrics.get("total_time_p99_ms"))

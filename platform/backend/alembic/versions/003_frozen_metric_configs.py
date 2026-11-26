@@ -1,7 +1,7 @@
 """Keep frozen BFCL rules separate from attempt-specific display configs.
 
 Revision ID: 003_frozen_metric_configs
-Revises: 002_profile_owner
+Revises: 003_timed_datasets
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision = "003_frozen_metric_configs"
-down_revision = "002_profile_owner"
+down_revision = "003_timed_datasets"
 branch_labels = None
 depends_on = None
 

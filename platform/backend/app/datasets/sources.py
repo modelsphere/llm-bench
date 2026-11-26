@@ -69,6 +69,14 @@ class LogSource(Protocol):
         """The most common `model` or `forwarded_to` values among the matching
         records, with counts, most common first."""
 
+    def iter_timing(self, filters: LogFilters, start: datetime, end: datetime) -> Iterator[dict]:
+        """Every matching record in the window with only its timing and token
+        counts (`load_profile.TIMING_FIELDS`), nested like `iter_window`. For
+        the load reading, which needs every request of a week but no bodies."""
+
+    #: Whether `iter_timing` is cheap (fields only) or reads whole records.
+    timing_is_cheap: bool
+
     def close(self) -> None: ...
 
 
@@ -81,8 +89,17 @@ class VictoriaLogsSource:
     """LogsQL over a VictoriaLogs store. Rows come back flattened with every
     value a string; `unflatten` restores the record the file source yields."""
 
+    timing_is_cheap = True
+
     def __init__(self, client: VictoriaLogsClient):
         self.client = client
+
+    def iter_timing(self, filters, start, end):
+        from app.datasets.load_profile import TIMING_FIELDS
+
+        pipe = "fields " + ", ".join(TIMING_FIELDS)
+        for row in self.client.iter_rows(build_query(filters, start, end, pipe=pipe)):
+            yield unflatten(row)
 
     def iter_window(self, filters, start, end, *, limit=0):
         for row in self.client.iter_rows(build_query(filters, start, end, limit=limit)):
@@ -189,6 +206,8 @@ class BodylogFilesSource:
 
     root: Path
     file_timezone: str = "UTC"
+    # Reading timing means parsing every whole line: a week of files is slow.
+    timing_is_cheap = False
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -270,6 +289,9 @@ class BodylogFilesSource:
         # transfer, but here the whole slice is local and the builder's
         # reservoir samples it uniformly. Stopping early would bias every
         # sample towards the start of its slice.
+
+    def iter_timing(self, filters, start, end):
+        return self.iter_window(filters, start, end)
 
     def describe(self, filters, start, end, *, limit=0):
         return (

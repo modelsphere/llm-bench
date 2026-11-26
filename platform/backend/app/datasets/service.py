@@ -117,6 +117,9 @@ def profile_to_build_profile(row: ReplayDatasetProfile) -> BuildProfile:
         "keep_builds": row.keep_builds,
         "min_retain_hours": row.min_retain_hours,
         "schedule_interval_hours": row.schedule_interval_hours,
+        "layout": getattr(row, "layout", None) or "sampled",
+        "session_field": getattr(row, "session_field", None) or "",
+        "max_idle_gap_s": getattr(row, "max_idle_gap_s", None) if getattr(row, "max_idle_gap_s", None) is not None else 5.0,
     })
 
 
@@ -289,6 +292,34 @@ def protected_build_ids(profile_name: str) -> set[str]:
             if build_id:
                 pinned.add(str(build_id))
     return pinned
+
+
+def fail_abandoned_builds() -> list[int]:
+    """Mark failed every RUNNING build whose heartbeat has gone stale.
+
+    The build queue lives in the collector's memory: a collector that dies
+    mid-build (killed for memory, a rollout) leaves its row RUNNING, nothing
+    ever picks it up again, and the profile refuses every new build (409) for
+    good. Failed, not retried: a build that ran its collector out of memory
+    would only do it again. A live build heartbeats every
+    HEARTBEAT_INTERVAL_SECONDS, so a stale one has no owner left."""
+    session = get_sync_session()
+    try:
+        cutoff = _now() - timedelta(seconds=CLAIM_STALE_SECONDS)
+        stale = (ReplayDatasetBuild.status == DatasetBuildStatus.RUNNING) & (
+            (ReplayDatasetBuild.heartbeat_at < cutoff) | ReplayDatasetBuild.heartbeat_at.is_(None))
+        ids = [i for (i,) in session.query(ReplayDatasetBuild.id).filter(stale).all()]
+        if ids:
+            session.query(ReplayDatasetBuild).filter(ReplayDatasetBuild.id.in_(ids), stale).update({
+                "status": DatasetBuildStatus.FAILED,
+                "finished_at": _now(),
+                "error": "the collector building it stopped (restarted, killed for memory or rolled out) "
+                         "before it finished",
+            }, synchronize_session=False)
+            session.commit()
+        return ids
+    finally:
+        session.close()
 
 
 def due_profiles() -> list[int]:
@@ -478,6 +509,8 @@ class Collector:
         waiting_for_schema = False
         while not self._stop.wait(SCHEDULER_TICK_SECONDS):
             try:
+                for build_id in fail_abandoned_builds():
+                    logger.warning("[collector] build %s had no collector left — marked failed", build_id)
                 for profile_id in due_profiles():
                     logger.info("[collector] profile %s is due — queueing", profile_id)
                     self.submit(profile_id, trigger="schedule")

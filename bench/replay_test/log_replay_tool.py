@@ -33,6 +33,13 @@ class MatchedRequest:
     request_body: str
     request_json: object | None
     raw_payload: dict
+    # Timed datasets only (platform/backend/app/datasets/timed.py): when to
+    # send the request and what it waits for. Small, so kept in lean loads.
+    timing: dict | None = None
+    # The capture's usage block (`raw_payload.resp_meta.usage`): production's
+    # token counts for this request. Small, so kept in lean loads, which drop
+    # raw_payload.
+    recorded_usage: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +53,7 @@ class MatchedRequest:
             "request_body": self.request_body,
             "request_json": self.request_json,
             "raw_payload": self.raw_payload,
+            **({"timing": self.timing} if self.timing is not None else {}),
         }
 
 
@@ -550,6 +558,12 @@ def write_extract_output(records: Iterable[MatchedRequest], output_path: str, pr
     return matched_count, token_counts
 
 
+def _usage_of(payload: object) -> dict | None:
+    meta = payload.get("resp_meta") if isinstance(payload, dict) else None
+    usage = meta.get("usage") if isinstance(meta, dict) else None
+    return usage if isinstance(usage, dict) else None
+
+
 def load_extract_jsonl(input_path: str, lean: bool = False) -> Iterator[MatchedRequest]:
     """Yield one MatchedRequest per non-blank JSONL line.
 
@@ -585,6 +599,8 @@ def load_extract_jsonl(input_path: str, lean: bool = False) -> Iterator[MatchedR
                 request_body=data["request_body"],
                 request_json=None if lean else data.get("request_json"),
                 raw_payload={} if lean else data.get("raw_payload", {}),
+                timing=data.get("timing"),
+                recorded_usage=_usage_of(data.get("raw_payload")),
             )
 
 
@@ -660,12 +676,35 @@ def request_needs_system_normalization(record: MatchedRequest) -> bool:
     return changed
 
 
+def recorded_completion_tokens(record: MatchedRequest) -> int | None:
+    """How many tokens production answered this request with (the capture's
+    usage block), or None when the capture recorded none. Lean loads drop
+    raw_payload and keep the usage block as recorded_usage."""
+    usage = record.recorded_usage if isinstance(record.recorded_usage, dict) else None
+    if usage is None:
+        usage = _usage_of(record.raw_payload) or {}
+    value = usage.get("completion_tokens")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        try:
+            value = int(str(value))
+        except (TypeError, ValueError):
+            return None
+    value = int(value)
+    return value if value > 0 else None
+
+
+# Fields that end a generation before its length: with a fixed output length
+# they would make two engines do different work again.
+_EARLY_STOP_FIELDS = ("stop", "stop_token_ids", "min_tokens")
+
+
 def build_replay_body(
     record: MatchedRequest,
     override_model: str | None,
     force_stream: bool = False,
     max_generation_tokens: int = 0,
     clean: bool = False,
+    fixed_output_tokens: int = 0,
 ) -> bytes:
     # Parse the body up front. Besides honoring model override / stream forcing,
     # we need to introspect the `stream` flag so we can inject
@@ -730,6 +769,21 @@ def build_replay_body(
                 capped_existing = True
         if not capped_existing:
             request_json["max_tokens"] = max_generation_tokens
+
+    # A fixed output length: the response runs to exactly this many tokens
+    # (the recorded one), whatever the model would have said, so every engine
+    # under test does the same work and the score measures speed alone. EOS
+    # and stop strings are ignored; max_generation_tokens still caps it.
+    if fixed_output_tokens and fixed_output_tokens > 0:
+        length = int(fixed_output_tokens)
+        if max_generation_tokens and max_generation_tokens > 0:
+            length = min(length, max_generation_tokens)
+        for key in _EARLY_STOP_FIELDS:
+            request_json.pop(key, None)
+        request_json.pop("max_completion_tokens", None)
+        request_json["max_tokens"] = length
+        request_json["min_tokens"] = length
+        request_json["ignore_eos"] = True
 
     # When the request streams, OpenAI-compatible servers (vLLM, SGLang, …) only
     # emit a `usage` block — and therefore prompt_tokens / cached_tokens — on the

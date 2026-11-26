@@ -152,6 +152,18 @@
             <span class="text-gray-400">{{ $t('replayDs.buckets') }}:</span>
             <span class="font-mono text-gray-500">{{ bucketLine(p.current.buckets) }}</span>
           </div>
+          <div v-if="p.current.timed" class="text-gray-600">
+            <span class="rounded bg-indigo-50 px-1.5 py-0.5 font-semibold uppercase tracking-wide text-[10px] text-indigo-800">{{ $t('replayDs.layoutTimedShort') }}</span>
+            {{ $t('replayDs.timedLine', {
+              requests: p.current.timed.requests.toLocaleString(),
+              sessions: p.current.timed.sessions.toLocaleString(),
+              following: Math.round(p.current.timed.following_share * 100),
+              real: Math.round(p.current.timed.window_s / 60),
+              replay: Math.round(p.current.timed.replay_s / 60),
+              c: p.current.timed.c_req_median.toFixed(1),
+            }) }}
+          </div>
+          <LoadReading v-if="p.current.load" :reading="p.current.load" />
           <p class="text-gray-400">{{ $t('replayDs.pinHint') }}</p>
         </div>
         <div v-else class="px-4 pb-4 text-xs text-amber-700">
@@ -492,6 +504,26 @@
             <legend class="px-1 text-xs font-semibold text-gray-500 uppercase">
               {{ $t('replayDs.sectionWindow') }}
             </legend>
+            <label class="block col-span-3">
+              <span class="font-medium text-gray-700">{{ $t('replayDs.fLayout') }}</span>
+              <select v-model="editing.layout" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm">
+                <option value="sampled">{{ $t('replayDs.layoutSampled') }}</option>
+                <option value="timed">{{ $t('replayDs.layoutTimed') }}</option>
+              </select>
+              <span class="text-xs text-gray-500">{{ $t('replayDs.fLayoutHint') }}</span>
+            </label>
+            <label v-if="editing.layout === 'timed'" class="block col-span-2">
+              <span class="font-medium text-gray-700">{{ $t('replayDs.fSessionField') }}</span>
+              <input v-model="editing.session_field" type="text" placeholder="req_headers.x-session-id"
+                     class="mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm font-mono" />
+              <span class="text-xs text-gray-500">{{ $t('replayDs.fSessionFieldHint') }}</span>
+            </label>
+            <label v-if="editing.layout === 'timed'" class="block">
+              <span class="font-medium text-gray-700">{{ $t('replayDs.fMaxIdleGap') }}</span>
+              <input v-model.number="editing.max_idle_gap_s" type="number" min="0" step="1"
+                     class="mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm" />
+              <span class="text-xs text-gray-500">{{ $t('replayDs.fMaxIdleGapHint') }}</span>
+            </label>
             <label class="block">
               <span class="font-medium text-gray-700">{{ $t('replayDs.fWindowHours') }}</span>
               <input v-model.number="editing.window_hours" type="number" min="1"
@@ -644,6 +676,7 @@ import {
   type ReplayDatasetProfile,
 } from '@/api/client'
 import { copyToClipboard } from '@/utils/clipboard'
+import LoadReading from '@/components/LoadReading.vue'
 
 const { t } = useI18n()
 
@@ -787,6 +820,7 @@ function blankProfile() {
     uris: ['/v1/chat/completions'], exclude_truncated: true, extra_logsql: '',
     window_hours: 24, window_timezone: 'UTC', subwindow_minutes: 60,
     sample_size: 2000, oversample_factor: 3, max_carry_multiple: 4, max_bytes: 8 * 1024 ** 3,
+    layout: 'sampled', session_field: '', max_idle_gap_s: 5,
     clean: true, max_model_len: 262144, keep_response_body: false, compress: true,
     min_records: 100, min_buckets: 1,
     schedule_interval_hours: 24, schedule_anchor_hour: null,
