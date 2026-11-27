@@ -2,6 +2,7 @@
 
 import json
 import threading
+from statistics import mean
 
 from bench.cache_usage import cache_metrics
 
@@ -54,6 +55,7 @@ def aggregate_metrics(events, wall_seconds=None):
         "http_attempt_count": count,
         "request_count": count,
         "request_error_count": errors,
+        "uptime": len(successes) / count if count else None,
         "retry_count": sum(e.get("http_attempt", 1) > 1 for e in generation),
         "infra_error_count": len(
             {
@@ -92,12 +94,22 @@ def aggregate_metrics(events, wall_seconds=None):
         and result["input_usage_coverage"] == result["output_usage_coverage"] == 1
         else None
     )
+    request_rates = []
+    for event in successes:
+        tokens = event.get("completion_tokens")
+        latency = event.get("latency_seconds")
+        if tokens is not None and latency is not None and latency > 0:
+            request_rates.append(tokens / latency)
+    result["request_output_tps"] = (
+        mean(request_rates) if successes and len(request_rates) == len(successes) else None
+    )
     ttft = [e["ttft_seconds"] for e in successes if e.get("ttft_seconds") is not None]
     e2e = [
         e["latency_seconds"] for e in successes if e.get("latency_seconds") is not None
     ]
     for percentile in (50, 90, 99):
         result[f"ttft_p{percentile}_ms"] = _percentile_ms(ttft, percentile)
+    result["ttft_mean_ms"] = 1000 * mean(ttft) if ttft else None
     result["ttft_sample_count"] = len(ttft)
     result["ttft_coverage"] = len(ttft) / len(successes) if successes else 0
     result["request_e2e_p90_ms"] = _percentile_ms(e2e, 90)

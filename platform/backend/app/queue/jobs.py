@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -808,10 +809,25 @@ def _add_card_normalized_tpm(result, submission, module_cls, module_name) -> Non
         getattr(submission, "cards_per_machine", None),
         getattr(submission, "machine_count", None),
     )
+    # BFCL omits the native total when token usage coverage is incomplete.
+    is_bfcl = module_name == "bfcl_v4"
     normalized = {
         k: v for k, v in card_normalized_tpm(result.metrics, cards, baseline).items()
         if k not in result.metrics
     }
+    if is_bfcl and result.metrics.get("total_tpm") is None:
+        normalized.pop("total_tpm_card_norm", None)
+    if is_bfcl:
+        for level, metrics in result.metrics.items():
+            if not (re.fullmatch(r"c[0-9]+", level) and isinstance(metrics, dict)):
+                continue
+            point = card_normalized_tpm(metrics, cards, baseline)
+            if metrics.get("total_tpm") is None:
+                point.pop("total_tpm_card_norm", None)
+            metrics.update(point)
+            result.extra_display_configs.extend(
+                {"key": f"{level}.{key}", "role": "display"} for key in point
+            )
     if not normalized:
         return
     result.metrics.update(normalized)

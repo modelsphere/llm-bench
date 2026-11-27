@@ -3,12 +3,81 @@ from importlib.util import find_spec
 import tempfile
 import unittest
 from pathlib import Path
-from bench.bfcl.runner import score_results
+from bench.bfcl.runner import read_generation_events, score_results
+from bench.bfcl.smoke import check_generated_cases
 from bench.bfcl.telemetry import aggregate_metrics, EventWriter
 from bench.bfcl.trace import TraceWriter
 
 
 class RunnerTests(unittest.TestCase):
+    def test_only_recorded_request_failures_may_have_inference_error_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            category = "multi_turn_base"
+            expected = {category: [f"{category}_0", f"{category}_1"]}
+            first, second = expected[category]
+            path = root / f"BFCL_v4_{category}_result.json"
+            path.write_text(
+                json.dumps({"id": first, "traceback": "request failed"}) + "\n"
+                + json.dumps({"id": second, "result": []}) + "\n"
+            )
+            check_generated_cases(root, expected, request_failed_cases={first})
+            with self.assertRaisesRegex(ValueError, "inference failed"):
+                check_generated_cases(root, expected, request_failed_cases={second})
+            with self.assertRaisesRegex(ValueError, "unexpected case outcome"):
+                check_generated_cases(root, expected, request_failed_cases={first, second})
+
+    def test_case_telemetry_distinguishes_a_recovered_retry_from_a_failed_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = {"multi_turn_long_context": ["recovered", "interrupted"]}
+            attempts = [
+                {"case_id": "recovered", "request_index": 0, "status": "error"},
+                {"case_id": "recovered", "request_index": 0, "status": "success"},
+                {"case_id": "interrupted", "request_index": 0, "status": "success"},
+                {"case_id": "interrupted", "request_index": 1, "status": "error"},
+            ]
+            timing = [
+                {"case_id": "recovered", "request_count": 1, "status": "generated"},
+                {"case_id": "interrupted", "request_count": 2, "status": "request_failed"},
+            ]
+            (root / "request_events.jsonl").write_text("\n".join(map(json.dumps, attempts)))
+            timing_path = root / "case_events.jsonl"
+            timing_path.write_text("\n".join(map(json.dumps, timing)))
+            _, _, failures = read_generation_events(root, cases, allow_request_failures=True)
+            self.assertEqual(failures, {"interrupted"})
+            with self.assertRaisesRegex(ValueError, "unsuccessful model calls"):
+                read_generation_events(root, cases, allow_request_failures=False)
+
+            timing[1]["status"] = "inference_error"
+            timing_path.write_text("\n".join(map(json.dumps, timing)))
+            with self.assertRaisesRegex(ValueError, "disagrees with case outcomes"):
+                read_generation_events(root, cases, allow_request_failures=True)
+
+    def test_slo_metrics_measure_generation_http_attempts(self):
+        metrics = aggregate_metrics([
+            {"status": "success", "ttft_seconds": 0.2, "latency_seconds": 2,
+             "completion_tokens": 40},
+            {"status": "success", "ttft_seconds": 0.4, "latency_seconds": 1,
+             "completion_tokens": 10},
+            {"status": "error", "latency_seconds": 2},
+            {"phase": "probe", "status": "success", "ttft_seconds": 9,
+             "latency_seconds": 9, "completion_tokens": 900},
+        ], wall_seconds=10)
+        self.assertEqual(metrics["uptime"], 2 / 3)
+        self.assertAlmostEqual(metrics["ttft_mean_ms"], 300)
+        self.assertEqual(metrics["request_output_tps"], 15)
+
+    def test_slo_rate_requires_usable_telemetry_for_every_success(self):
+        complete = {"status": "success", "latency_seconds": 1, "completion_tokens": 10}
+        for incomplete in (
+            {"status": "success", "latency_seconds": 1},
+            {"status": "success", "latency_seconds": 0, "completion_tokens": 10},
+        ):
+            with self.subTest(event=incomplete):
+                self.assertIsNone(aggregate_metrics([complete, incomplete])["request_output_tps"])
+        self.assertIsNone(aggregate_metrics([])["uptime"])
+
     def test_tpm_uses_generation_wall_time_and_excludes_probe(self):
         events = [
             {"status": "success", "prompt_tokens": 100, "completion_tokens": 10},

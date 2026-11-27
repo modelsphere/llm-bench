@@ -103,6 +103,13 @@ The resolved IDs are written to each attempt's `manifest.json` and participate
 in its `protocol_hash`. Default head selection preserves the existing scan
 protocol hash; tail selection participates in the scan protocol hash explicitly.
 
+`allow_request_failures` defaults to false. When enabled, cases interrupted by
+recorded HTTP or transport failures are scored as incorrect in the full case set.
+Use `case_results.jsonl` and `summary.json` for these adjusted scores. The raw
+BFCL files under `score/` retain the upstream evaluator's scores.
+Uptime includes all generation HTTP attempts, including failed retries. Use an
+`uptime` redline to set the required success rate for a benchmark.
+
 Importable benchmark examples are available for
 [tool use](../../benchmarks/bfcl-v4-tool-use-v1.yaml) and
 [long-context multi-turn](../../benchmarks/bfcl-v4-multi-turn-long-context-v1.yaml).

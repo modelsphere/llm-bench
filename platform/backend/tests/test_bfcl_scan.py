@@ -16,7 +16,8 @@ from app.api.submissions import _normalize_extra_params
 from app.db.models import Benchmark, ModuleRunStatus, Submission, SubmissionStatus
 from app.queue import jobs
 from app.schemas.benchmarks import SubmissionExtraParams
-from bench.modules.base import BenchmarkCancelled, BenchmarkTimeout, EndpointConfig
+from bench.modules.base import BenchmarkCancelled, BenchmarkTimeout, EndpointConfig, ModuleResult
+from bench.modules.bfcl_v4 import BFCLV4Module
 
 
 def test_bfcl_scan_budget_is_below_actual_actor_limit():
@@ -25,9 +26,21 @@ def test_bfcl_scan_budget_is_below_actual_actor_limit():
     assert BFCL_SCAN_MAX_SECONDS + 3600 <= jobs.run_submission.options["time_limit"] / 1000
 
 
+@pytest.mark.parametrize("total, expected", [(1200, 600), (None, None)])
+def test_bfcl_fixed_concurrency_normalizes_total_across_all_machines(total, expected):
+    submission = SimpleNamespace(id=41, cards_per_machine=8, machine_count=2)
+    result = ModuleResult(metrics={"input_tpm": 1000, "output_tpm": 200, "total_tpm": total})
+
+    jobs._add_card_normalized_tpm(result, submission, BFCLV4Module, "bfcl_v4")
+
+    assert result.metrics.get("total_tpm_card_norm") == expected
+    assert result.metrics["total_tpm"] == total
+
+
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize("failure", [None, "timeout", "cancel", "late_cancel", "quality", "all",
                                      "artifact_cancel", "scoring_cancel", "complete_cancel", "final_cancel",
+                                     "slo_highest", "slo_all",
                                      "scan_rule_pass", "scan_rule_fail"])
 def test_worker_executes_and_freezes_the_submission_grid_without_point_fanout(
     tmp_path, monkeypatch, failure, retry,
@@ -50,6 +63,12 @@ def test_worker_executes_and_freezes_the_submission_grid_without_point_fanout(
             {"key": "sweep_canceled", "role": "redline", "max_val": 0},
             {"key": "sweep_points_completed", "role": "redline",
              "min_val": 6 if failure == "scan_rule_fail" else 5},
+        ])
+    if failure in ("slo_highest", "slo_all"):
+        frozen_configs.extend([
+            {"key": "ttft_p99_ms", "role": "redline", "max_val": 8000},
+            {"key": "request_output_tps", "role": "redline", "min_val": 15},
+            {"key": "uptime", "role": "redline", "min_val": 0.99},
         ])
     run = SimpleNamespace(id=42, module_name="bfcl_v4", params_json={
         "concurrency": 2, "request_timeout_seconds": 45},
@@ -89,8 +108,18 @@ def test_worker_executes_and_freezes_the_submission_grid_without_point_fanout(
             if c == 8 and failure == "cancel":
                 submission.status = SubmissionStatus.CANCELED
                 raise BenchmarkCancelled("user canceled")
-            (root / "summary.json").write_text(json.dumps({"metrics": {
-                "total_tpm": 1000 * c, "accuracy": 0.5 if c == 8 or failure == "quality" else 0.9}}))
+            metrics = {
+                "total_tpm": 1000 * c,
+                "accuracy": 0.5 if c == 8 or failure == "quality" else 0.9,
+            }
+            if failure in ("slo_highest", "slo_all"):
+                metrics.update(
+                    accuracy=0.9,
+                    ttft_p99_ms=8000,
+                    request_output_tps=15,
+                    uptime=0.98 if c == 8 or failure == "slo_all" else 0.99,
+                )
+            (root / "summary.json").write_text(json.dumps({"metrics": metrics}))
     monkeypatch.setattr("bench.modules.bfcl_v4.run_process", runner)
     if failure == "late_cancel":
         refreshes = []
@@ -139,15 +168,19 @@ def test_worker_executes_and_freezes_the_submission_grid_without_point_fanout(
     assert run.frozen_metric_configs_json == frozen_configs
     assert run.metric_configs_json[:len(frozen_configs)] == frozen_configs
     assert "prior_attempt_only" not in {c["key"] for c in run.metric_configs_json}
-    if failure in ("quality", "all", "scan_rule_fail"):
+    if failure in ("quality", "all", "scan_rule_fail", "slo_all"):
         assert not run.passed and not submission.passed
     else:
         assert run.metrics_json["reported_concurrency"] == 6
         assert run.passed and run.status == ModuleRunStatus.DONE
         assert submission.passed
     if failure != "all":
-        expected_score = 8000 if failure == "quality" else 6000
+        expected_score = 8000 if failure in ("quality", "slo_all") else 6000
         assert run.score == submission.score_total == expected_score
+        assert run.metrics_json["total_tpm_card_norm"] == expected_score * 4
+        assert run.metrics_json["c6"]["total_tpm_card_norm"] == 24000
+    if failure in ("slo_highest", "slo_all"):
+        assert run.metrics_json["c8"]["eligible"] == 0
     if retry:
         # A further redelivery must also discard this attempt's display rows.
         assert any(c["key"].startswith("c1.") for c in run.metric_configs_json)

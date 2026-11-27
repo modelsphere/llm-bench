@@ -7,6 +7,7 @@ import os
 import time
 from importlib.util import find_spec
 from pathlib import Path
+from statistics import StatisticsError
 
 from bench.bfcl.diagnostics import DiagnosticError, exception_details, save_state
 from bench.bfcl.smoke import category_output, check_generated_cases, installed_revision
@@ -18,6 +19,10 @@ from utils.api import join_endpoint, to_base_url
 REVISION = "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8"
 REGISTRY_KEY = "llmbench-bfcl-streaming"
 _case = contextvars.ContextVar("bfcl_case")
+
+
+class RequestFailed(RuntimeError):
+    """A request with an HTTP, transport, or incomplete-stream failure."""
 
 
 def score_results(root, cases):
@@ -87,6 +92,7 @@ def write_probe_report(root, case_id):
 def handler_class(base, config, root, *, phase="generate"):
     """Override only the official inference boundary and transport call."""
     import httpx
+    from openai import APIError
     from openai.types.chat import ChatCompletion
 
     events = EventWriter(root / "request_events.jsonl")
@@ -135,6 +141,8 @@ def handler_class(base, config, root, *, phase="generate"):
                 status = "generated"
                 return response
             except Exception as exc:
+                if isinstance(exc, RequestFailed):
+                    status = "request_failed"
                 diagnostic = exception_details(exc)
                 raise
             finally:
@@ -222,7 +230,13 @@ def handler_class(base, config, root, *, phase="generate"):
                         or attempt == max_attempts
                         or time.monotonic() + delay >= deadline
                     ):
-                        raise RuntimeError(
+                        request_failure = (
+                            isinstance(exc, (APIError, httpx.HTTPError, TimeoutError))
+                            or (isinstance(exc, DiagnosticError)
+                                and exc.code == "completion_stream_incomplete")
+                        )
+                        error_type = RequestFailed if request_failure else RuntimeError
+                        raise error_type(
                             f"BFCL request failed: {type(exc).__name__}"
                         ) from None
                 finally:
@@ -234,6 +248,42 @@ def handler_class(base, config, root, *, phase="generate"):
                 time.sleep(delay)
 
     return StreamingHandler
+
+
+def read_generation_events(root, cases, *, allow_request_failures):
+    events = [
+        json.loads(line)
+        for line in (root / "request_events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    case_events = [
+        json.loads(line)
+        for line in (root / "case_events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    expected = {case_id for ids in cases.values() for case_id in ids}
+    timing = {event["case_id"]: event for event in case_events}
+    if set(timing) != expected or len(timing) != len(case_events):
+        raise ValueError("BFCL case telemetry coverage mismatch")
+    request_keys = {(event["case_id"], event["request_index"]) for event in events}
+    successful = {
+        (event["case_id"], event["request_index"])
+        for event in events if event["status"] == "success"
+    }
+    failed_cases = {case_id for case_id, _ in request_keys - successful}
+    if allow_request_failures:
+        recorded_failures = {
+            case_id for case_id, event in timing.items() if event["status"] == "request_failed"
+        }
+        expected_requests = {
+            (case_id, index)
+            for case_id, event in timing.items() for index in range(event["request_count"])
+        }
+        if request_keys != expected_requests or failed_cases != recorded_failures:
+            raise ValueError("BFCL request telemetry disagrees with case outcomes")
+    elif failed_cases:
+        raise ValueError("BFCL generation contains unsuccessful model calls")
+    return events, timing, failed_cases
 
 
 def select_tail_cases(root):
@@ -270,6 +320,7 @@ def run_phase(phase, root):
         return
     config = json.loads((root / "config.json").read_text())
     manifest = config["manifest"]
+    allow_request_failures = manifest.get("allow_request_failures", False)
     if manifest["revision"] != REVISION:
         raise DiagnosticError("BFCL manifest revision does not match pinned runner", "manifest_revision_mismatch")
     if installed_revision() != REVISION:
@@ -322,7 +373,14 @@ def run_phase(phase, root):
                 write_probe_report(root, manifest["cases"]["multi_turn_base"][0])
         wall_seconds = time.monotonic() - started
         stage("validate_generated_cases")
-        check_generated_cases(root / "result" / REGISTRY_KEY, manifest["cases"])
+        failed_cases = set()
+        if phase == "generate" and allow_request_failures:
+            _, _, failed_cases = read_generation_events(
+                root, manifest["cases"], allow_request_failures=True
+            )
+        check_generated_cases(
+            root / "result" / REGISTRY_KEY, manifest["cases"], request_failed_cases=failed_cases
+        )
         if phase == "probe":
             return
         (root / "generation.json").write_text(
@@ -330,51 +388,49 @@ def run_phase(phase, root):
         )
     else:
         stage("validate_generated_cases")
-        check_generated_cases(root / "result" / REGISTRY_KEY, manifest["cases"])
+        events, case_timing, failed_cases = read_generation_events(
+            root, manifest["cases"], allow_request_failures=allow_request_failures
+        )
+        check_generated_cases(
+            root / "result" / REGISTRY_KEY, manifest["cases"], request_failed_cases=failed_cases
+        )
         stage("evaluate")
         started = time.monotonic()
-        cli(
-            [
-                "evaluate",
-                "--model",
-                REGISTRY_KEY,
-                "--partial-eval",
-                "--test-category",
-                ",".join(manifest["cases"]),
-            ],
-            standalone_mode=False,
-        )
+        try:
+            cli(
+                [
+                    "evaluate",
+                    "--model",
+                    REGISTRY_KEY,
+                    "--partial-eval",
+                    "--test-category",
+                    ",".join(manifest["cases"]),
+                ],
+                standalone_mode=False,
+            )
+        except StatisticsError as exc:
+            # The pinned CLI writes case scores before its leaderboard CSV,
+            # whose latency standard deviation fails with only one sample.
+            frames = [
+                (frame["file"], frame["function"]) for frame in exception_details(exc)["frames"]
+            ]
+            if not failed_cases or frames[-2:] != [
+                ("eval_runner_helper.py", "get_cost_latency_info"), ("statistics.py", "stdev")
+            ]:
+                raise
         stage("validate_scores")
         cases = score_results(root / "score" / REGISTRY_KEY, manifest["cases"])
         grading_seconds = time.monotonic() - started
         generation_seconds = json.loads((root / "generation.json").read_text())[
             "wall_seconds"
         ]
-        events = [
-            json.loads(line)
-            for line in (root / "request_events.jsonl").read_text().splitlines()
-            if line.strip()
-        ]
-        request_keys = {(event["case_id"], event["request_index"]) for event in events}
-        successful = {
-            (event["case_id"], event["request_index"])
-            for event in events
-            if event["status"] == "success"
-        }
-        if request_keys != successful:
-            raise ValueError("BFCL generation contains unsuccessful model calls")
-        case_timing = {
-            event["case_id"]: event
-            for event in (
-                json.loads(line)
-                for line in (root / "case_events.jsonl").read_text().splitlines()
-            )
-        }
-        if set(case_timing) != {case["case_id"] for case in cases}:
-            raise ValueError("BFCL case telemetry coverage mismatch")
         with (root / "case_results.jsonl").open("w") as output:
             for case in cases:
                 timing = case_timing[case["case_id"]]
+                if case["case_id"] in failed_cases:
+                    # BFCL can accept an inference error as no tool call in irrelevance cases.
+                    case["success"] = False
+                    case["request_failed"] = True
                 case["request_count"] = timing["request_count"]
                 case["wall_seconds"] = (
                     timing["finished_monotonic"] - timing["started_monotonic"]

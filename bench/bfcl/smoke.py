@@ -23,8 +23,8 @@ def category_output(root, category, kind):
     return paths[0]
 
 
-def check_generated_cases(root, cases):
-    """Reject partial generation before BFCL's partial evaluator can score it."""
+def check_generated_cases(root, cases, *, request_failed_cases=frozenset()):
+    """Require a result for every case, including any recorded request failures."""
     for category, expected in cases.items():
         path = category_output(root, category, "result")
         with path.open(encoding="utf-8") as source:
@@ -34,11 +34,15 @@ def check_generated_cases(root, cases):
                                   "generation_case_coverage_mismatch", category=category,
                                   expected_count=len(expected), actual_count=len(rows),
                                   missing_case_ids=sorted(set(expected) - {row["id"] for row in rows})[:10])
-        if any("traceback" in row or "error" in row for row in rows):
+        failed = {row["id"] for row in rows if "traceback" in row or "error" in row}
+        unexpected = failed - request_failed_cases
+        if unexpected:
             raise DiagnosticError(f"BFCL inference failed for {category}",
                                   "generation_inference_failed", category=category,
-                                  failed_case_ids=[row["id"] for row in rows
-                                                   if "traceback" in row or "error" in row][:10])
+                                  failed_case_ids=sorted(unexpected)[:10])
+        if request_failed_cases.intersection(expected) - failed:
+            raise DiagnosticError(f"BFCL recorded an unexpected case outcome for {category}",
+                                  "generation_case_outcome_mismatch", category=category)
 
 
 def installed_revision():

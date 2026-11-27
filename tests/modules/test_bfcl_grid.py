@@ -62,7 +62,7 @@ class BFCLGridTest(unittest.TestCase):
                 self.assertEqual(len(selections), 1)
 
     def execute(self, points, *, bad=None, cancel=None, missing=None, timeout=False,
-                failure_type=RuntimeError, accuracy=None, configs=None):
+                failure_type=RuntimeError, accuracy=None, configs=None, point_metrics=None):
         seen = []
         roots = []
         def process(command, **kwargs):
@@ -80,6 +80,7 @@ class BFCLGridTest(unittest.TestCase):
                     raise failure_type("failed point")
                 metrics = {"accuracy": accuracy if accuracy is not None else (0.5 if concurrency == 8 else 0.9),
                            "total_tpm": concurrency * 1000, "ttft_coverage": 1.0}
+                metrics.update((point_metrics or {}).get(concurrency, {}))
                 if missing == concurrency:
                     del metrics["total_tpm"]
                 (root / "summary.json").write_text(json.dumps({"metrics": metrics}))
@@ -125,6 +126,28 @@ class BFCLGridTest(unittest.TestCase):
                 self.assertEqual(result.metrics["sweep_canceled"], 0)
                 self.assertEqual(result.metrics["sweep_points_completed"], 2)
                 self.assertIn("error", result.metrics["c3"])
+
+    def test_grid_excludes_points_that_fail_any_slo_redline(self):
+        configs = [
+            {"key": "accuracy", "role": "redline", "min_val": 0.8},
+            {"key": "ttft_mean_ms", "role": "redline", "max_val": 8000},
+            {"key": "request_output_tps", "role": "redline", "min_val": 15},
+            {"key": "uptime", "role": "redline", "min_val": 0.99},
+        ]
+        passing = {"ttft_mean_ms": 8000, "request_output_tps": 15, "uptime": 0.99}
+        point_metrics = {
+            1: passing,
+            2: {**passing, "ttft_mean_ms": 8001},
+            3: {**passing, "request_output_tps": 14},
+            4: {**passing, "uptime": 0.98},
+            5: {**passing, "uptime": None},
+        }
+        result, _, _ = self.execute(list(point_metrics), configs=configs, point_metrics=point_metrics)
+        self.assertEqual(result.metrics["reported_concurrency"], 1)
+        self.assertEqual(result.metrics["c1"]["eligible"], 1)
+        for concurrency in (2, 3, 4):
+            self.assertEqual(result.metrics[f"c{concurrency}"]["eligible"], 0)
+        self.assertEqual(result.metrics["c5"]["valid"], 0)
 
     def test_cancel_and_total_budget_preserve_partial_artifacts(self):
         result, seen, _ = self.execute([1, 3, 8], cancel=3)
